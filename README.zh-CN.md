@@ -70,6 +70,15 @@ skills/slack-bridge/scripts/install.sh /workspace/slack-bot
    转发的 Slack 消息，按 `/workspace/slack-bot/README.md` 处理，注意 `is_owner`，
    然后运行 payload 里的 `reply.command` 回复。
 
+## 运维：重启与恢复
+
+电脑或云端机器重启、转发程序崩溃后怎么办，如何用 `status.sh` / `doctor.sh` / 日志检查，
+如何用 `start.sh` / `restart.sh` 重启（需要 shell 里有 4 个环境变量；在 Grok Bot 的云端
+电脑上，密钥会自动注入新进程），常见故障（Token 轮换后 `invalid_auth`、两个转发程序分走消息、
+例行任务密钥更换后 webhook 401、Socket 反复断线）及解决办法，以及可定时运行的自愈脚本
+`ensure-running.sh`（附 Grok Bot 例行任务提示词和 cron 写法），见
+[docs/operations.md](docs/operations.md)（英文）。
+
 ## 切换 Agent、账号或 Token
 
 Slack 应用和 Token 保持不变，只重新提供发生变化的部分：

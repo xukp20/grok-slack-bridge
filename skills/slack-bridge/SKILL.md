@@ -29,6 +29,7 @@ All scripts live in `<install>/scripts/` and are idempotent:
 ```text
 install.sh <install-dir> [--bot-name NAME]   create/update install (venv, symlinks, README, config)
 start.sh | stop.sh | restart.sh | status.sh  manage the background bridge (nohup + setsid + pidfile)
+ensure-running.sh [--dry-run] [--quiet]      no-op if healthy; start/restart if stopped, hung or disconnected
 doctor.sh [--ping-webhook] [--json]          validate env, tokens (auth.test, apps.connections.open), webhook, process
 reconfigure.sh [--ping-webhook] [--agent-label L] [--owner U…]   doctor, then restart only if all checks pass
 reply.sh --channel C [--thread-ts T] [--ack-ts T] <<'EOF' … EOF    reply as the bot (Markdown)
@@ -57,6 +58,18 @@ slackctl.sh thread|react|whoami|config|render-manifest …
   open connections. Stop the old bridge when moving.
 - The bridge inherits env at start; after a machine restart or env change,
   run `start.sh`/`restart.sh` from a shell that has the variables.
+
+## Operations and recovery
+
+After a machine restart or crash the bridge is simply not running: run
+`start.sh` (needs the four env vars; on a Grok Bot box saved secrets reach new
+processes automatically). `ensure-running.sh` is the idempotent self-healing
+check for a periodic routine or cron: exit 0 healthy/recovered, 1 failed,
+2 blocked by missing env. For failures (`invalid_auth` after rotation, two
+bridges splitting events, webhook 401 after a routine key change, socket
+disconnect loops), the suggested routine prompt and cron lines, see
+[docs/operations.md](../../docs/operations.md). Never restart a healthy bridge
+without a reason; `restart.sh` drops events for a few seconds.
 
 ## Alternatives
 

@@ -48,6 +48,9 @@ a half-configured switch never takes down a working bridge.
 
 ## Troubleshooting
 
+Full runbook (restarts, crashes, self-healing): `docs/operations.md` at the
+repository root.
+
 | Symptom | Check |
 | --- | --- |
 | No 👀 on new messages | `status.sh`; bridge not running or app not invited to the channel (`/invite @bot`) |

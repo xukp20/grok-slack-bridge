@@ -44,6 +44,7 @@ class Bridge:
         self.user_cache: dict[str, dict] = {}
         self.stats = {"received": 0, "forwarded": 0, "skipped": 0, "failed": 0}
         self.started_at = time.time()
+        self.last_connected_at = self.started_at
         self.stop_event = threading.Event()
         self.webhook_url = common.env_value(common.ENV_WEBHOOK_URL)
         self.webhook_auth = common.normalize_auth_header(common.env_value(common.ENV_WEBHOOK_AUTH))
@@ -98,11 +99,16 @@ class Bridge:
                 log.warning("could not update config.json: %s", exc)
 
     def write_heartbeat(self) -> None:
+        now = time.time()
+        connected = bool(self.socket and self.socket.is_connected())
+        if connected:
+            self.last_connected_at = now
         state = {
             "pid": os.getpid(),
             "started_at": int(self.started_at),
-            "heartbeat_at": int(time.time()),
-            "connected": bool(self.socket and self.socket.is_connected()),
+            "heartbeat_at": int(now),
+            "connected": connected,
+            "last_connected_at": int(self.last_connected_at),
             "bot_user_id": self.bot_user_id,
             "webhook_host": common.webhook_host(self.webhook_url),
             **self.stats,

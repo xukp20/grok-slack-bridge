@@ -89,6 +89,7 @@ EOF
 | Start (idempotent, background, survives the shell) | `@HOME@/scripts/start.sh` |
 | Stop / restart | `@HOME@/scripts/stop.sh` / `@HOME@/scripts/restart.sh` |
 | Status + recent log | `@HOME@/scripts/status.sh [N]` |
+| Self-heal (no-op when healthy) | `@HOME@/scripts/ensure-running.sh [--dry-run] [--quiet]` |
 | Full health check | `@HOME@/scripts/doctor.sh [--ping-webhook]` |
 | Record the owner | `@HOME@/scripts/set-owner.sh U0123456789` |
 | Change a setting | `@HOME@/scripts/slackctl.sh config set <key> <value>` |
@@ -119,5 +120,6 @@ changes are picked up live; env changes need `restart.sh` (or
 See `references/reconnect.md` for switching agents/accounts and rotating
 tokens, and `references/setup-slack-app.md` for creating the Slack app.
 
+Restart/recovery runbook: `docs/operations.md` in the source repository.
 See `docs/slack-connection-options.md` in the source repository for other
 ways to connect Slack (MCP connector, Composio, Cursor channel listener).

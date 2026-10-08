@@ -29,6 +29,8 @@
   &middot;
   <a href="#switching-agents-accounts-or-tokens">Reconnect</a>
   &middot;
+  <a href="docs/operations.md">Operations</a>
+  &middot;
   <a href="docs/slack-connection-options.md">Alternatives</a>
   &middot;
   <a href="skills/slack-bridge/SKILL.md">Skill Reference</a>
@@ -139,6 +141,7 @@ Create a webhook-triggered routine in your agent whose prompt says roughly:
 
 ```bash
 scripts/status.sh                    # running? heartbeat, counters, last log lines
+scripts/ensure-running.sh            # start/restart only if stopped or unhealthy (for routines/cron)
 scripts/reply.sh --channel C0123 --thread-ts 1712345678.000100 <<'EOF'
 **Done.** Here is the summary…
 EOF
@@ -170,6 +173,13 @@ only), and the Cursor Slack app with a Slack-listener routine on a channel
 (inbound, but replies appear as the Cursor app and there are no DMs), and
 explains when each is the better fit.
 
+## Operations
+
+Restarts, crashes and recovery (what happens when the machine reboots, how
+to check and restart, common failures, and the self-healing
+`ensure-running.sh` for a periodic routine or cron):
+[docs/operations.md](docs/operations.md).
+
 ## Safety Boundaries
 
 - Secrets come only from environment variables; nothing writes them to disk
@@ -191,6 +201,7 @@ skills/slack-bridge/
   config.example.json      all config keys with defaults
 docs/
   slack-connection-options.md   alternatives we evaluated and why this design
+  operations.md                 restarts, crashes, failures, self-healing
   publishing.md                 gh device login and first push
 tests/                     unit tests (standard library only)
 ```

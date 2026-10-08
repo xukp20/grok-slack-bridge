@@ -184,12 +184,13 @@ def check(cfg: dict, ident, actor: Actor, *, channel: str, root_ts: str = "", en
         if owner and actor.user == owner:
             return Verdict(True, "owner", "owner", list(OWNER_PERMISSIONS), policy=policy)
         mode = policy["human_access"]
+        chan = policy["channel_user_allowlist"]
+        if chan is not None and actor.user not in chan:
+            return refuse("not in this channel's user_allowlist")
         if mode == "everyone":
             return Verdict(True, "human_access=everyone", "user", list(DEFAULT_PERMISSIONS), policy=policy)
         if mode == "allowlist":
-            in_global = actor.user in policy["user_allowlist"]
-            chan = policy["channel_user_allowlist"]
-            if in_global and (chan is None or actor.user in chan):
+            if actor.user in policy["user_allowlist"]:
                 return Verdict(True, "user_allowlist", "user", list(DEFAULT_PERMISSIONS), policy=policy)
             return refuse("not in user_allowlist")
         return refuse("human_access=owner_only" + ("" if owner else " and no owner configured"))

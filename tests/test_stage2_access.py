@@ -121,6 +121,16 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(chk(c, human(OTHER)).allowed)
         self.assertTrue(chk(c, human(OTHER), channel="C0ELSE").allowed)
 
+    def test_channel_user_allowlist_narrows_even_everyone(self):
+        c = cfg(human_access="everyone", channel_overrides={"C0CHAN": {"user_allowlist": ["U0ALICE"]}})
+        self.assertFalse(chk(c, human(OTHER)).allowed)
+        self.assertTrue(chk(c, human("U0ALICE")).allowed)
+        self.assertTrue(chk(c, human(OTHER), channel="C0ELSE").allowed)
+        c = cfg(human_access="allowlist", user_allowlist=[OTHER],
+                channel_overrides={"C0CHAN": {"user_allowlist": ["U0ALICE"]}})
+        self.assertFalse(chk(c, human(OTHER)).allowed)       # in global list, not the channel's
+        self.assertFalse(chk(c, human("U0ALICE")).allowed)   # in the channel's, not the global
+
     def test_channel_allowlist(self):
         c = cfg(human_access="everyone", channel_allowlist=["C0CHAN"])
         self.assertTrue(chk(c, human(OTHER)).allowed)

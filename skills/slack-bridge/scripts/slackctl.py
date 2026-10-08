@@ -779,6 +779,168 @@ def cmd_routing(args) -> int:
     return 0
 
 
+CHANNEL_ID_RE = re.compile(r"^[CG][A-Z0-9]{6,}$")
+
+
+def _backup_config(path: Path) -> Path | None:
+    """Copy config.json to config.json.bak-<epoch> (mode 0600). Returns the backup path."""
+    if not path.exists():
+        return None
+    backup = path.with_name(f"config.json.bak-{int(time.time())}")
+    n = 0
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"config.json.bak-{int(time.time())}-{n}")
+    fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(path.read_text(encoding="utf-8"))
+    return backup
+
+
+def _route_env_problem(flag: str, name: str) -> str | None:
+    """Why NAME is not usable as a dedicated route's env var name. Never echoes NAME
+    when it looks like a value (URL, token, header), because it may be a secret."""
+    if "://" in name or common.SECRET_PATTERN.search(name) or " " in name.strip():
+        return (f"{flag} looks like a secret value (URL, token or Authorization header). "
+                "Pass the environment variable NAME, e.g. GROK_WEBHOOK_URL_DEV; the value stays "
+                "in the environment / box secrets only. Nothing was written.")
+    if not common.ENV_NAME_RE.match(name):
+        return f"{flag} must be an env var name (A-Z, 0-9, _; e.g. GROK_WEBHOOK_URL_DEV)"
+    if name in common.REQUIRED_ENV:
+        return f"{flag} reuses {name}; a dedicated agent needs its own variables"
+    return None
+
+
+def cmd_route(args) -> int:
+    """Add or remove one channel's session route (dedicated agent webhook or main)."""
+    home = common.resolve_home(args.home)
+    path = common.config_path(home)
+    channel = (args.channel or "").strip()
+    if not CHANNEL_ID_RE.match(channel):
+        die("--channel must be a Slack channel ID (C… or G…); DMs always use the main conversation")
+    # Edit the file as written (not the defaults-merged view), like migrate-config.
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except ValueError as exc:
+        die(f"{path} is not valid JSON ({exc}); fix it or restore a backup first")
+    if not isinstance(cfg, dict):
+        die(f"{path} must contain a JSON object")
+    routing = dict(cfg.get("session_routing") or {})
+    routing.setdefault("default", "main")
+    channels = dict(routing.get("channels") or {})
+    old = channels.get(channel)
+
+    if args.action == "remove":
+        if old is None:
+            print(f"no session route for {channel}; nothing to do")
+            return 0
+        channels.pop(channel)
+        routing["channels"] = channels
+        cfg["session_routing"] = routing
+        print(f"removing route for {channel}: {json.dumps(old, ensure_ascii=False)}")
+        if args.dry_run:
+            print("(dry run; nothing written)")
+            return 0
+        backup = _backup_config(path)
+        if backup:
+            print(f"backup: {backup}")
+        common.save_config(home, cfg)
+        print(f"updated {path}")
+        print("\nNext steps:\n"
+              f"  1. Takes effect live (no restart): new messages in {channel} go to the main "
+              "conversation.\n"
+              f"  2. Check: slackctl.sh routing --channel {channel}  (expect target main, source default)\n"
+              "  3. Optional cleanup: pause or delete the dedicated agent's webhook routine, delete its "
+              "two box secrets / env vars, keep or archive the channel memory file.\n"
+              "  4. Variables of a removed route are dropped from the bridge at its next restart.")
+        return 0
+
+    # add / replace
+    target = args.target
+    entry: dict = {"target": target}
+    label = (args.label or "").strip()
+    if label:
+        if "://" in label or common.SECRET_PATTERN.search(label):
+            die("--label looks like a URL or token; use a plain name. Nothing was written.")
+        entry["label"] = label
+    if target == "dedicated":
+        if not (args.url_env and args.auth_env):
+            die("a dedicated route needs --url-env NAME and --auth-env NAME (env var names, not values)")
+        for flag, name in (("--url-env", args.url_env.strip()), ("--auth-env", args.auth_env.strip())):
+            problem = _route_env_problem(flag, name)
+            if problem:
+                die(problem)
+        if args.url_env.strip() == args.auth_env.strip():
+            die("--url-env and --auth-env must be two different variables")
+        entry["webhook_url_env"] = args.url_env.strip()
+        entry["webhook_auth_env"] = args.auth_env.strip()
+    elif args.url_env or args.auth_env:
+        die("--url-env/--auth-env only apply to --target dedicated")
+    if args.busy_policy:
+        entry["busy_policy"] = args.busy_policy
+
+    if old is not None and old != entry and not args.replace:
+        die(f"{channel} already has a route: {json.dumps(old, ensure_ascii=False)}\n"
+            "  pass --replace to overwrite it (a backup is made), or remove it first")
+
+    env_ok = True
+    if target == "dedicated":
+        for name in (entry["webhook_url_env"], entry["webhook_auth_env"]):
+            val = common.env_value(name)
+            if not val:
+                state, env_ok = "missing", False
+            elif name == entry["webhook_url_env"] and not val.lower().startswith("https://"):
+                state, env_ok = "set, but not an https:// URL", False
+            else:
+                state = "set"
+            print(f"env {name}: {state}")
+        if not env_ok and not args.allow_missing_env:
+            die("the route's env vars are not usable in this shell. Save the webhook URL and "
+                "Authorization value as secrets / export them first (never paste them in chat), "
+                "or pass --allow-missing-env (until they exist the bridge delivers this channel "
+                "to the main conversation). Nothing was written.")
+
+    routing["channels"] = dict(channels, **{channel: entry})
+    cfg["session_routing"] = routing
+    problems = common.validate_routing(cfg)
+    if problems:
+        die("refusing to write an invalid route: " + "; ".join(problems))
+    print(f"route for {channel}: {json.dumps(entry, ensure_ascii=False)}"
+          + (" (unchanged)" if old == entry else (" (replaces " + json.dumps(old, ensure_ascii=False) + ")"
+                                                   if old is not None else "")))
+    if args.dry_run:
+        print("(dry run; nothing written)")
+        return 0
+    if old != entry:
+        backup = _backup_config(path)
+        if backup:
+            print(f"backup: {backup}")
+        try:
+            common.save_config(home, cfg)
+        except ValueError as exc:
+            die(str(exc))
+        print(f"updated {path}")
+    steps = []
+    if target == "dedicated":
+        steps.append("Restart so the bridge reads the new env vars (it reads secrets only at start): "
+                     "scripts/restart.sh  (or re-run with --restart)")
+    else:
+        steps.append("Takes effect live; no restart needed for a main route / busy_policy change")
+    steps += [f"Check: slackctl.sh routing --channel {channel}  (expect target {target}"
+              + (", webhook dedicated)" if target == "dedicated" else ")"),
+              "Check: doctor.sh  (route line shows TLS ok; no request is sent)"]
+    if target == "dedicated":
+        steps += [f"Make sure the bot is in the channel (/invite) and create the channel memory file "
+                  f"state/channels/{channel}.md (template: references/channel-memory-template.md)",
+                  "Test: @mention the bot in the channel; the dedicated agent should answer, "
+                  "and slackctl.sh ops list should show the operation completed",
+                  f"Roll back any time: slackctl.sh route remove --channel {channel}"]
+    print("\nNext steps:")
+    for i, s_ in enumerate(steps, 1):
+        print(f"  {i}. {s_}")
+    return 0
+
+
 def cmd_migrate_config(args) -> int:
     home = common.resolve_home(args.home)
     path = common.config_path(home)
@@ -1142,6 +1304,20 @@ def build_parser() -> argparse.ArgumentParser:
     rt = sub.add_parser("routing", help="show which agent conversation handles each channel")
     rt.add_argument("--channel")
     rt.set_defaults(func=cmd_routing)
+
+    ro = sub.add_parser("route", help="add/replace or remove one channel's session route (backs up config)")
+    ro.add_argument("action", choices=("add", "remove"))
+    ro.add_argument("--channel", required=True, help="channel ID (C… or G…)")
+    ro.add_argument("--target", choices=common.ROUTE_TARGETS, default="dedicated")
+    ro.add_argument("--label", help="human-readable name of the handling agent")
+    ro.add_argument("--url-env", help="NAME of the env var holding the dedicated webhook URL")
+    ro.add_argument("--auth-env", help="NAME of the env var holding its Authorization value")
+    ro.add_argument("--busy-policy", choices=common.BUSY_POLICIES, help="per-channel busy_policy")
+    ro.add_argument("--replace", action="store_true", help="overwrite an existing, different entry")
+    ro.add_argument("--allow-missing-env", action="store_true",
+                    help="write the route even if its env vars are not set in this shell")
+    ro.add_argument("--dry-run", action="store_true")
+    ro.set_defaults(func=cmd_route)
 
     mc = sub.add_parser("migrate-config", help="add missing access/routing keys (legacy access -> explicit policy)")
     mc.add_argument("--dry-run", action="store_true")

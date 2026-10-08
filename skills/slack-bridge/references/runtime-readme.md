@@ -172,6 +172,7 @@ EOF
 | Validate access config | `slackctl.sh access validate` |
 | Upgrade an old config (adds missing access/routing keys) | `slackctl.sh migrate-config [--dry-run]` |
 | Which conversation handles a channel | `slackctl.sh routing [--channel C…]` |
+| Route a channel to a dedicated agent / back to main | `@HOME@/scripts/add-channel-route.sh --channel C… --label "…" --url-env NAME --auth-env NAME` / `--remove --channel C…` (backs up config; no restart unless `--restart`) |
 | Record the owner | `@HOME@/scripts/set-owner.sh U0123456789` |
 | Change a setting | `@HOME@/scripts/slackctl.sh config set <key> <value>` |
 | Switch agent/account, rotate tokens | export new values, then `@HOME@/scripts/reconfigure.sh` |

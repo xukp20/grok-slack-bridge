@@ -8,12 +8,21 @@
     "app_home": {
       "home_tab_enabled": false,
       "messages_tab_enabled": true,
-      "messages_tab_read_only_enabled": false
+      "messages_tab_read_only_enabled": false,
+      "agent_tasks_enabled": true
     },
     "bot_user": {
       "display_name": "Grok Bot",
       "always_online": true
     },
+    "slash_commands": [
+      {
+        "command": "/grok",
+        "description": "Ask Grok Bot",
+        "usage_hint": "[question or task]",
+        "should_escape": false
+      }
+    ],
     "agent_view": {
       "agent_description": "Chat with your Grok Bot assistant from Slack.",
       "suggested_prompts": [
@@ -37,15 +46,26 @@
       "bot": [
         "app_mentions:read",
         "assistant:write",
+        "canvases:read",
+        "canvases:write",
         "channels:history",
+        "channels:read",
         "chat:write",
+        "commands",
+        "files:read",
+        "files:write",
         "groups:history",
+        "groups:read",
         "im:history",
         "im:read",
         "im:write",
         "mpim:history",
+        "mpim:read",
+        "reactions:read",
         "reactions:write",
-        "users:read"
+        "users.profile:read",
+        "users:read",
+        "users:read.email"
       ]
     }
   },
@@ -54,6 +74,10 @@
       "bot_events": [
         "app_mention",
         "message.im",
+        "message.channels",
+        "message.groups",
+        "message.mpim",
+        "reaction_added",
         "app_context_changed",
         "agent_session_stopped",
         "agent_session_title_changed"

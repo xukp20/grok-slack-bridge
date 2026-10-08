@@ -27,17 +27,39 @@ import common  # noqa: E402
 
 BOT_SCOPES = [
     "app_mentions:read",
+    "canvases:read",
+    "canvases:write",
     "channels:history",
+    "channels:read",
     "chat:write",
+    "commands",
+    "files:read",
+    "files:write",
     "groups:history",
+    "groups:read",
     "im:history",
     "im:read",
     "im:write",
     "mpim:history",
+    "mpim:read",
+    "reactions:read",
     "reactions:write",
+    "users.profile:read",
     "users:read",
+    "users:read.email",
 ]
-BOT_EVENTS = ["app_mention", "message.im"]
+# Channel/group-DM messages and reactions are subscribed so the bridge can later
+# follow threads the bot is in without an @mention; until it filters them,
+# common.should_handle drops them (only DMs and @mentions are forwarded).
+BOT_EVENTS = [
+    "app_mention",
+    "message.im",
+    "message.channels",
+    "message.groups",
+    "message.mpim",
+    "reaction_added",
+]
+DEFAULT_SLASH_COMMAND = "/grok"
 # Slack agent features ("Agents" in app settings / manifest features.agent_view).
 AGENT_SCOPES = ["assistant:write"]
 AGENT_EVENTS = ["app_context_changed", "agent_session_stopped", "agent_session_title_changed"]
@@ -94,7 +116,8 @@ def read_text(args) -> str:
 
 def build_manifest(name: str, description: str, color: str = "#111827",
                    display_name: str | None = None, agent_view: bool = True,
-                   prompts: list[dict] | None = None) -> dict:
+                   prompts: list[dict] | None = None,
+                   slash_command: str | None = DEFAULT_SLASH_COMMAND) -> dict:
     manifest = {
         "display_information": {
             "name": name,
@@ -121,12 +144,24 @@ def build_manifest(name: str, description: str, color: str = "#111827",
             "token_rotation_enabled": False,
         },
     }
+    if slash_command:
+        cmd = slash_command if slash_command.startswith("/") else "/" + slash_command
+        manifest["features"]["slash_commands"] = [{
+            "command": cmd,
+            "description": f"Ask {name}"[:100],
+            "usage_hint": "[question or task]",
+            "should_escape": False,
+        }]
+    else:
+        manifest["oauth_config"]["scopes"]["bot"].remove("commands")
     if agent_view:
+        manifest["features"]["app_home"]["agent_tasks_enabled"] = True
         manifest["features"]["agent_view"] = {
             "agent_description": description[:300],
             "suggested_prompts": list(DEFAULT_PROMPTS if prompts is None else prompts)[:4],
         }
-        manifest["oauth_config"]["scopes"]["bot"] = sorted(BOT_SCOPES + AGENT_SCOPES)
+        manifest["oauth_config"]["scopes"]["bot"] = sorted(
+            manifest["oauth_config"]["scopes"]["bot"] + AGENT_SCOPES)
         manifest["settings"]["event_subscriptions"]["bot_events"] = BOT_EVENTS + AGENT_EVENTS
     return manifest
 
@@ -183,7 +218,9 @@ def parse_prompts(values: list[str] | None) -> list[dict] | None:
 def cmd_render_manifest(args) -> int:
     manifest = build_manifest(args.name, args.description, args.color, args.display_name,
                               agent_view=not args.no_agent_view,
-                              prompts=parse_prompts(args.prompt))
+                              prompts=parse_prompts(args.prompt),
+                              slash_command=None if args.slash_command in ("", "none")
+                              else args.slash_command)
     if args.format == "json":
         text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
     else:
@@ -633,6 +670,8 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--color", default="#111827")
     m.add_argument("--prompt", action="append", metavar="'Title|Message'",
                    help="suggested prompt shown in the agent view (repeat, max 4)")
+    m.add_argument("--slash-command", default=DEFAULT_SLASH_COMMAND,
+                   help="slash command to register (default /grok; 'none' to omit)")
     m.add_argument("--no-agent-view", action="store_true",
                    help="plain bot app without Slack's agent features")
     m.add_argument("--format", choices=("yaml", "json"), default="yaml")

@@ -31,15 +31,28 @@ One-time, done by a Slack workspace member who may install apps.
 | `chat:write` | post replies |
 | `channels:history`, `groups:history`, `mpim:history` | read thread context (`slackctl.sh thread`) in public/private channels and group DMs |
 | `reactions:write` | 👀 receipt / ✅ done reactions |
+| `reactions:read` | see reactions on messages (and receive `reaction_added`) |
 | `users:read` | include the sender's name in payloads, verify the owner ID |
+| `users.profile:read`, `users:read.email` | resolve people more precisely ("what did Alex say?") |
+| `channels:read`, `groups:read`, `mpim:read` | channel names and members for context |
+| `files:read` | download files and images people send to the bot |
+| `files:write` | upload generated files, reports and images |
+| `canvases:read`, `canvases:write` | read and write Slack canvases |
+| `commands` | the `/grok` slash command (`render-manifest --slash-command none` to omit) |
 | `assistant:write` | Slack agent features: sessions ("Working…" + Stop), titles, context events ([agent-view](../../../docs/agent-view.md)) |
 
-Events: `app_mention`, `message.im`, plus the agent events
+Events: `app_mention`, `message.im`, `message.channels`, `message.groups`,
+`message.mpim`, `reaction_added`, plus the agent events
 `app_context_changed`, `agent_session_stopped`, `agent_session_title_changed`
 (drop them and the scope with `render-manifest --no-agent-view` for a plain
-bot). Plain channel messages are not
-forwarded unless they mention the bot, so the bot never reads a channel
-uninvited.
+bot; that also drops `features.app_home.agent_tasks_enabled`).
+
+The channel-message and reaction events are subscribed ahead of bridge
+support for following threads without an @mention and for reaction triggers.
+Until that lands, the bridge acknowledges and drops them: plain channel
+messages are not forwarded unless they mention the bot, so the bot never acts
+on a channel uninvited. `/grok` invocations are likewise acknowledged but not
+yet forwarded.
 
 If you later add scopes or events, Slack asks you to **reinstall** the app;
 the bot token usually stays the same, but re-check with `doctor.sh`.

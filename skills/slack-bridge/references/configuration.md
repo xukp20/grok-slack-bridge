@@ -147,7 +147,8 @@ and `slackctl.sh threads`.
 | `report_webhook_failures` | `3` | consecutive delivery problems before a report (`0` = never) |
 | `report_disconnect_seconds` | `300` | report a Slack disconnect longer than this |
 | `error_text` | … | fixed text sent to a human when their message could not be delivered (never exception details) |
-| `error_reaction`, `react_on_receipt`, `ack_reaction` | `warning`, `true`, `eyes` | reactions |
+| `ack` | `{"mode": "reaction", "emoji": "eyes", "status_text": "正在处理…"}` | receipt acknowledgement done by the bridge right after a message is queued (never blocks forwarding). `reaction`: add `:emoji:`; if that fails (e.g. no `reactions:write` yet), log it and, in DMs/agent threads with `assistant:write`, set the assistant status `status_text` instead. `status`: prefer the assistant status, reaction where there is none. `none`: no ack. `reply.sh --op` removes it after the final reply / `--no-reply`; `stop` removes it too. Replaces the legacy `react_on_receipt` / `ack_reaction` (still read if `ack` is absent; `migrate-config` converts them) |
+| `error_reaction` | `warning` | added when delivery failed |
 | `slash_ack_text`, `slash_usage_text` | … | ephemeral answers to `/grok` |
 
 ## Session routing

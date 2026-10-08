@@ -9,9 +9,24 @@ Slack themselves, every message would be handled by a fresh agent with no
 memory of the previous message, and two quick messages could be answered by
 two runs racing each other.
 
+## Acknowledgement is done by the bridge
+
+The user should see right away that the message arrived, but the run must
+not need to say so. The bridge acknowledges every accepted message itself,
+in code, right after queueing it: a 👀 reaction (`ack.mode: reaction`,
+default; `ack.emoji`). If the reaction fails (e.g. `reactions:write` not
+granted until the app is reinstalled) it logs the error and, in DMs and
+agent threads where `assistant:write` allows it, sets the assistant status
+`ack.status_text` ("正在处理…") instead. `ack.mode: status` prefers the
+status (reaction elsewhere); `none` turns acknowledgements off. The ack
+never blocks or delays forwarding. The bridge records what it did per
+operation, and the final `reply.sh --op …` or `--no-reply` removes it
+(an interim `--session-status processing` reply keeps it; `stop` removes it
+too). The payload says `"acknowledged": {"by": "bridge", "mode": …}`.
+
 ## Main-session handoff: one shared, ordered context
 
-So the routine run is only a dispatcher. The payload carries
+So the routine run is only a dispatcher, and a silent one. The payload carries
 `routing` (built by the bridge from `config.json`):
 
 ```json
@@ -19,8 +34,11 @@ So the routine run is only a dispatcher. The payload carries
             "source": "default", "label": "", "webhook": "default"}
 ```
 
-- `target: "main"` — the run hands the whole payload to the owner's **main
-  Grok Bot conversation** and ends. All DMs and every channel without its
+- `target: "main"` — the run posts **nothing** to Slack (no interim
+  "收到…"), hands the payload to the owner's **main Grok Bot
+  conversation** once (WakeParent: event details plus the exact
+  `reply.command`) and ends. `payload.handling` spells this out:
+  `{"routine_run": "silent_handoff", "post_to_slack": "never", …}`. All DMs and every channel without its
   own agent land in that one conversation, so it keeps one shared, ordered
   context (what was asked in the DM earlier, which task is in progress, what
   was already answered), and it answers with the payload's
@@ -28,7 +46,11 @@ So the routine run is only a dispatcher. The payload carries
   `completed` in the bridge's state.
 - `target: "dedicated"` — the channel is routed to a separate Grok Bot
   agent with its own webhook; that agent's conversation handles the
-  channel's messages with its own context.
+  channel's messages with its own context (`handling.routine_run:
+  "answer"`, one final reply, no interim message).
+
+The routine prompt that implements this is in
+[skills/slack-bridge/references/inbox-routine-prompt.md](../skills/slack-bridge/references/inbox-routine-prompt.md).
 
 `source` is `default` (no entry for this channel) or `channel`; `webhook`
 says which webhook the bridge used; `fallback` appears when a dedicated

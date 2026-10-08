@@ -18,9 +18,10 @@ a half-configured switch never takes down a working bridge.
 
 ## Switch to another agent (same machine)
 
-1. In the new agent, create a webhook-triggered routine whose prompt says:
-   "A Slack message forwarded by slack-bridge; follow <install>/README.md to
-   handle and reply." Copy its URL and Authorization header.
+1. In the new agent, create a webhook-triggered routine with the prompt in
+   [inbox-routine-prompt.md](inbox-routine-prompt.md) (silent handoff to the
+   main conversation; the bridge itself shows 👀). Copy its URL and
+   Authorization header.
 2. Export `GROK_WEBHOOK_URL` and `GROK_WEBHOOK_AUTH` with the new values
    (secret store / env, never a file).
 3. `scripts/reconfigure.sh --agent-label "new agent name" --ping-webhook`.

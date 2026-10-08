@@ -14,8 +14,8 @@ the user specifies; the reference install is `/workspace/slack-bot`.
 
 Slack app (Socket Mode, created from `manifest/`) → `scripts/bridge.py`
 (long-running: acks, records every message in `run/bridge.sqlite`, checks
-access, handles commands, applies trigger and bot loop limits, marks
-"Working…" or 👀) → `POST GROK_WEBHOOK_URL` with
+access, handles commands, applies trigger and bot loop limits, and
+acknowledges the message itself with 👀, or "正在处理…" if the reaction fails) → `POST GROK_WEBHOOK_URL` with
 `Authorization: GROK_WEBHOOK_AUTH` → agent routine → `scripts/reply.sh --op`
 posts the answer as the bot and closes the operation.
 
@@ -36,9 +36,11 @@ posts the answer as the bot and closes the operation.
   resets; bot threads stay paused after restarts.
 - **Session routing** ([docs/session-model.md](../../docs/session-model.md)):
   each Slack message starts its own routine run, so the run only
-  dispatches. `payload.routing.target` `main` (DMs and channels without
-  their own agent; `session_routing.default`): hand the payload to the
-  owner's main Grok Bot conversation, which keeps one shared, ordered
+  dispatches, silently (the bridge already acknowledged; `ack`
+  `reaction|status|none`). `payload.routing.target` `main` (DMs and channels without
+  their own agent; `session_routing.default`): post nothing to Slack, hand the payload once to the
+  owner's main Grok Bot conversation (WakeParent; routine prompt:
+  [references/inbox-routine-prompt.md](references/inbox-routine-prompt.md)), which keeps one shared, ordered
   context and answers with `reply.sh --op`. `dedicated`: a channel listed in
   `session_routing.channels` is posted to its own agent's webhook (env var
   **names** `webhook_url_env`/`webhook_auth_env`; unset → default webhook).
@@ -81,9 +83,11 @@ slackctl.sh thread|react|session|whoami|config|render-manifest …
 
 1. Parse the payload ([format v2](references/payload.md)). Ignore `type: bridge_ping`.
    **Routing:** if `routing.target` is `main` (or `routing.fallback` is
-   set) and you are the routine run, hand the whole payload to the owner's
-   main Grok Bot conversation and stop; the main conversation does steps
-   2–7. If `dedicated`, this agent handles it. Apply `routing.busy_policy`
+   set) and you are the routine run, post nothing to Slack (no interim
+   acknowledgement; the bridge already shows 👀): hand the payload once to the owner's
+   main Grok Bot conversation with the event details and the exact
+   `reply.command`, then stop; the main conversation does steps
+   2–7 (`payload.handling` says the same). If `dedicated`, this agent handles it. Apply `routing.busy_policy`
    when a message arrives mid-task: `interrupt_merge` merges same-thread
    follow-ups into one answer (close merged ops with `--no-reply --reason
    "merged into Ev…"`), `queue` finishes first. Every operation gets exactly
@@ -95,7 +99,7 @@ slackctl.sh thread|react|session|whoami|config|render-manifest …
 3. Fetch context when needed: `slackctl.sh thread --channel C --ts T`
    (refused senders are hidden).
 4. Run `reply.command` from the payload (it carries `--op`) with the answer
-   as the heredoc body. Check for `"ok": true`. **Exit 3 / `"stopped": true`
+   as the heredoc body; it also removes the bridge's 👀 / "正在处理…". Check for `"ok": true`. **Exit 3 / `"stopped": true`
    means the user stopped the task: do not retry or post another way.** On
    other failures run `doctor.sh` and report.
 5. Not answering (e.g. a bot's thanks or a loop): run `reply.no_reply_command`.

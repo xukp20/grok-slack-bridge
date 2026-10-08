@@ -30,6 +30,9 @@ Delivery), so the agent should not expect duplicates; it can still use
     "no_reply_command": "/workspace/slack-bot/scripts/reply.sh --op Ev0… --channel C0… --thread-ts 1791460290.248329 --no-reply --ack-ts 1791460300.000100",
     "readme": "/workspace/slack-bot/README.md"
   },
+  "acknowledged": {"by": "bridge", "mode": "reaction", "emoji": "eyes"},
+  "handling": {"routine_run": "silent_handoff", "post_to_slack": "never",
+               "instructions": "Main route: post NOTHING to Slack from the routine run …"},
   "agent_session": null, "viewing_context": null, "raw_event": {"…": "…"}
 }
 ```
@@ -54,6 +57,8 @@ Delivery), so the agent should not expect duplicates; it can still use
 | `files` | list | id, name, mimetype, size, permalink (no contents; `slackctl.sh download --file-id`) |
 | `thread` | object | task state of the thread: `thread_key` (team:channel:root:app), `task_id`, `state` (`active`, `completed`, `no_reply`, `stopped`, `paused`), `bot_turns` |
 | `routing` | object | who handles the message (`docs/session-model.md`): `target` `main` (hand the payload to the owner's main Grok Bot conversation, which answers with `reply.command`) or `dedicated` (this channel's own agent handles it); `busy_policy` `interrupt_merge` \| `queue` (what the handling conversation does with a message arriving while it works); `source` `default` \| `channel`; `label`; `webhook` `default` \| `dedicated` (which webhook the bridge used); for dedicated routes `webhook_url_env`/`webhook_auth_env` (env var **names**, never values); `fallback` (reason) when a dedicated route was unusable and the default webhook was used |
+| `acknowledged` | object | `{by: "bridge", mode, emoji}`: the bridge acknowledges the message itself right after queueing it (`ack` config: 👀 reaction by default, assistant status "正在处理…" if the reaction fails, in DMs/agent threads). The routine never needs to post a "received" message. `--ack-ts` in the reply commands lets `reply.sh --op` remove whatever the bridge added |
+| `handling` | object | what the receiving routine run should do: `routine_run` `silent_handoff` (main route: post nothing, hand off once with `reply.command`, end) or `answer` (dedicated route: answer here, one final reply); `post_to_slack` `never` \| `final_reply_only`; `instructions` (plain text) |
 | `reply.channel`, `reply.thread_ts` | | where to answer (`/grok` answers go to the user's DM) |
 | `reply.command` | string | ready-to-run `reply.sh --op …` with a heredoc placeholder |
 | `reply.no_reply_command` | string | records a deliberate non-answer |

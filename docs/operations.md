@@ -31,7 +31,9 @@ instead of an error (see the troubleshooting table below).
 ([session model](session-model.md)): DMs and channels without their own
 agent are handed by the routine run to the owner's **main** Grok Bot
 conversation (one shared, ordered context; it answers with `reply.sh --op`),
-so the run itself is short; a channel can be routed to a dedicated agent's
+so the run itself is short and **silent**: the bridge has already put 👀 on
+the message (`ack`), and the run posts nothing
+([routine prompt](../skills/slack-bridge/references/inbox-routine-prompt.md)); a channel can be routed to a dedicated agent's
 webhook. What the handling conversation does with a message that arrives
 while it works is `busy_policy` (`interrupt_merge` default, or `queue`).
 `slackctl.sh routing` shows the effective route per channel; `doctor.sh`
@@ -125,6 +127,9 @@ the shell first; never put them in a file in the install directory.
 | ⚠️ with `giving up on … after 3 attempts (not delivered: …)` | Webhook host unreachable (connect/TLS failure, request never sent) | `doctor.sh` (TLS check); retry later |
 | `delivery of … has an unknown result (timed out … / HTTP 504 …)`; op `unknown-result` | No answer after the request was sent, or a gateway timeout (504) after forwarding it: the agent may be running it | Never resent automatically. `ops show`, then `ops resolve --to completed` if the agent answered, or `ops retry --force` if it clearly did not; raise `webhook_timeout_seconds` |
 | Repeated `slack_sdk.socket_mode` warnings/errors, heartbeat `connected=false` for minutes | Socket disconnect loop: network trouble, app token revoked mid-run, or too many connections (max 10 per app) | `doctor.sh`; fix token; stop stray bridges; `restart.sh`. `ensure-running.sh` restarts after `--stale-seconds` (default 300) of disconnection |
+| 👀 stays on a message and no answer comes | The routine run did not hand off (check its runs), or the main conversation never ran `reply.sh --op` for it | `slackctl.sh ops list` shows the open operation; answer it, or `ops resolve <op> --to no_reply`; remove the mark with `slackctl.sh react --channel C --ts T --name eyes --remove` |
+| No 👀 but "正在处理…" in DMs; log `receipt reaction :eyes: … failed (missing_scope)` | The token lacks `reactions:write` (scope added to the manifest but the app not reinstalled) | Reinstall the app in Slack (app settings → Install App); `doctor.sh` row "receipt ack" turns ok |
+| An interim "收到，正在转给主会话…" message appears | The inbox routine still uses an old prompt | Replace it with [inbox-routine-prompt.md](../skills/slack-bridge/references/inbox-routine-prompt.md) |
 | No 👀 at all in a channel | Bot not in the channel, or message did not @mention it | `/invite @Grok Bot`; mention it |
 | No 👀 at all in DMs, status says stopped | Machine restarted / crash | `start.sh` |
 | `slack_sdk is not installed` / missing venv | Install directory moved or venv deleted | `skills/slack-bridge/scripts/install.sh <dir>` (safe to re-run) |

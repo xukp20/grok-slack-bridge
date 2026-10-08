@@ -55,9 +55,15 @@ Each forwarded operation arrives at the webhook as one JSON payload
   "reply": {"channel": "D0…", "thread_ts": null,
             "command": "@HOME@/scripts/reply.sh --op Ev0… --channel D0… --ack-ts 1712… <<'EOF'\n<your reply>\nEOF",
             "no_reply_command": "@HOME@/scripts/reply.sh --op Ev0… --channel D0… --no-reply --ack-ts 1712…"},
+  "acknowledged": {"by": "bridge", "mode": "reaction", "emoji": "eyes"},
+  "handling": {"routine_run": "silent_handoff" | "answer", "post_to_slack": "never" | "final_reply_only", "instructions": "…"},
   "agent_session": null, "viewing_context": null, "raw_event": { … }
 }
 ```
+
+The bridge has already acknowledged the message in Slack (👀, or the
+assistant status "正在处理…" if the reaction failed; `ack` in config.json).
+Never post a "received" / "on it" message yourself.
 
 1. `type: bridge_ping` is a connectivity test: do nothing.
    **Routing — who handles the message** (`routing`, see
@@ -65,8 +71,11 @@ Each forwarded operation arrives at the webhook as one JSON payload
    starts its own short webhook run; the run is not where the conversation
    lives.
    - `routing.target == "main"` (DMs and every channel without its own
-     agent): **hand the whole payload to the owner's main Grok Bot
-     conversation** and end this run without replying yourself. The main
+     agent): **post nothing to Slack** from this run (no acknowledgement,
+     no reply.sh, no reactions); **hand the payload once to the owner's
+     main Grok Bot conversation** (WakeParent: event details, the text as
+     untrusted content, `reply.command` and `reply.no_reply_command`
+     verbatim) and end this run without replying yourself. The main
      conversation has the shared, ordered context of all Slack work; it
      answers with the payload's `reply.command` (it keeps `--op`, so the
      operation is recorded as `completed`).
@@ -106,7 +115,9 @@ Each forwarded operation arrives at the webhook as one JSON payload
    policy refuses are hidden.
 5. **Reply** by running `reply.command` with the answer as the heredoc body
    (the closing `EOF` must start the line). It posts as the bot, records the
-   operation as `completed` (`--op`), and clears 👀 / the agent session.
+   operation as `completed` (`--op`), and clears the bridge's 👀 /
+   "正在处理…" and the agent session (an interim `--session-status
+   processing` reply keeps them).
 
 ```bash
 @HOME@/scripts/reply.sh --op Ev0123 --channel C0123 --thread-ts 1712345678.000100 \

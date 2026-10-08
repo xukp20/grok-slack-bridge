@@ -22,7 +22,7 @@ bridge implements the Agent experience. Source docs:
   starts its own session thread, listed in a timeline above the composer;
   users can pin, rename, or archive sessions. The bot replies in that thread.
 - **"Working…" status with a Stop button** while the agent handles a message
-  (replaces the 👀 receipt reaction).
+  (the bridge's 👀 receipt reaction is added as well; both end with the reply).
 - **Session titles** taken from the first message of the conversation.
 - **Suggested prompts** at the top of the Messages tab (up to four, from the
   manifest).
@@ -87,8 +87,8 @@ the agent.
 
 **Automatic fallback.** If Slack refuses the session call (the app has no
 agent view yet, e.g. `not_authorized`, or a missing scope), the bridge logs
-it once and behaves exactly as before: 👀 reaction, top-level DM replies,
-`--ack-ts` in the reply command. Set `agent_sessions` to `false` in
+it once and behaves exactly as before: top-level DM replies, no
+"Working…" (the 👀 receipt ack from `ack` works either way). Set `agent_sessions` to `false` in
 `config.json` to force the plain behaviour.
 
 **Ending "Working…".** With `agents.sessions.*`, posting a message does not

@@ -50,12 +50,19 @@ class Msg:
         return self.user or self.bot_id or self.app_id
 
     @property
-    def msg_key(self) -> str:
-        return f"{self.channel}:{self.ts}"
+    def msg_key(self) -> str | None:
+        return f"{self.channel}:{self.ts}" if self.ts else None
 
     @property
     def fingerprint(self) -> str:
         return store.message_fingerprint(self.channel, self.ts, self.actor, self.text)
+
+    def actor_obj(self):
+        import access
+        return access.Actor(user=self.user, bot_id=self.bot_id, app_id=self.app_id,
+                            is_bot=self.actor_type == "bot", team_id=self.team_id,
+                            user_team=self.user_team if self.actor_type == "human" else "",
+                            api_app_id=self.api_app_id)
 
     def thread_key(self, ident: Identity) -> str:
         return store.thread_key(self.team_id or ident.team_id, self.channel, self.root_ts,
@@ -135,3 +142,19 @@ def catchup_envelope(message: dict[str, Any], channel: str, channel_type: str,
     event["channel_type"] = channel_type
     return {"event_id": f"catchup:{channel}:{message.get('ts')}", "team_id": ident.team_id,
             "api_app_id": ident.app_id, "event": event, "catchup": True}
+
+
+def slash_message(payload: dict[str, Any], dm_channel: str) -> Msg:
+    """A /command invocation as a Msg (replies go to the user's DM with the bot)."""
+    text = (payload.get("text") or "").strip()
+    user = payload.get("user_id") or ""
+    trigger = payload.get("trigger_id") or ""
+    return Msg(
+        op_id=f"cmd:{trigger or store.fingerprint(user, text, payload.get('channel_id'))}",
+        event_type="slash_command", team_id=str(payload.get("team_id") or ""),
+        api_app_id=str(payload.get("api_app_id") or ""), channel=dm_channel, channel_type="im",
+        ts="", thread_ts="", root_ts="", text=text, user=user, bot_id="", app_id="",
+        user_team="", actor_type="human", is_dm=True, mentions_bot=True,
+        raw={"type": "slash_command", "channel": dm_channel, "channel_type": "im", "user": user,
+             "text": text, "command": payload.get("command"),
+             "source_channel": payload.get("channel_id")})

@@ -139,3 +139,25 @@ def env(text="hi", user=OWNER, channel="D0DM", ts=None, thread_ts=None, etype="m
         event["subtype"] = subtype
     return {"event_id": event_id or f"Ev{next(_ids):06d}", "team_id": team, "api_app_id": app,
             "event": event}
+
+
+class SyncPool:
+    """Runs submitted work inline (deterministic tests)."""
+
+    def submit(self, fn, *a, **kw):
+        fn(*a, **kw)
+
+    def shutdown(self, *a, **kw):
+        pass
+
+
+def slash(text="do it", user=OWNER, channel="C0CHAN", team=TEAM, app=APP, trigger="trig1"):
+    return {"team_id": team, "api_app_id": app, "user_id": user, "channel_id": channel,
+            "command": "/grok", "text": text, "trigger_id": trigger}
+
+
+def button(action_id="bridge:stop", user=OWNER, channel="C0CHAN", ts="1700000000.000100",
+           team=TEAM, app=APP, value=""):
+    return {"type": "block_actions", "team": {"id": team}, "api_app_id": app,
+            "user": {"id": user, "team_id": team}, "channel": {"id": channel},
+            "message": {"ts": ts}, "actions": [{"action_id": action_id, "value": value}]}

@@ -93,8 +93,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "team_id": "",
     "bot_user_id": "",
     "owner_user_id": "",
-    "access": "everyone",
+    # Access (stage 2). Default deny: only the owner can use the bot.
+    "human_access": "owner_only",       # everyone | allowlist | owner_only
+    "user_allowlist": [],
+    "user_denylist": [],
+    "bot_access": "none",               # none | allowlist | all
+    "bot_allowlist": [],                # [{"user_id","bot_id","app_id","label","channels","threads","expires_at","max_turns"}]
+    "bot_denylist": [],
+    "channel_allowlist": [],            # empty = every channel the bot is in
+    "channel_overrides": {},            # {"C…": {...}} may only tighten access
     "deny_message": "Sorry, I only take requests from my owner here.",
+    "error_text": "Sorry, something went wrong on my side. The owner can check the bridge log.",
+    "slash_ack_text": "Got it. I'll answer in our DM.",
+    "slash_usage_text": "Usage: /grok <question or task>",
     "react_on_receipt": True,
     "ack_reaction": "eyes",
     "error_reaction": "warning",
@@ -117,7 +128,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "retention_days": 30,
 }
 
-ACCESS_MODES = ("everyone", "owner_only")
+ACCESS_MODES = ("everyone", "allowlist", "owner_only")
+BOT_ACCESS_MODES = ("none", "allowlist", "all")
+LIST_KEYS = ("user_allowlist", "user_denylist", "bot_denylist", "channel_allowlist")
 
 
 def resolve_home(explicit: str | None = None) -> Path:
@@ -143,7 +156,32 @@ def load_config(home: Path) -> dict[str, Any]:
         if not isinstance(data, dict):
             raise ValueError(f"{path} must contain a JSON object")
         cfg.update(data)
+        # Legacy (pre-stage-2) key: honour an explicit old setting until migrated.
+        if "access" in data and "human_access" not in data:
+            cfg["human_access"] = data["access"] if data["access"] in ACCESS_MODES else "owner_only"
     return cfg
+
+
+def migrate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Convert a pre-stage-2 config to explicit access keys (default deny).
+
+    Legacy access=everyone becomes human_access=owner_only: the new default is
+    deny-by-default, and opening the bot to everyone must be an explicit choice.
+    """
+    notes = []
+    out = dict(data)
+    if "access" in out:
+        legacy = out.pop("access")
+        if "human_access" not in out:
+            out["human_access"] = "owner_only"
+            notes.append(f"access={legacy} -> human_access=owner_only"
+                         + (" (set human_access=everyone explicitly to reopen)" if legacy == "everyone" else ""))
+    for key in ("human_access", "user_allowlist", "user_denylist", "bot_access", "bot_allowlist",
+                "bot_denylist", "channel_allowlist", "channel_overrides"):
+        if key not in out:
+            out[key] = DEFAULT_CONFIG[key]
+            notes.append(f"added {key}={json.dumps(DEFAULT_CONFIG[key])}")
+    return out, notes
 
 
 SECRET_PATTERN = re.compile(r"xox[abpre]-|xapp-|bearer\s", re.IGNORECASE)
@@ -175,10 +213,21 @@ def coerce_config_value(key: str, raw: str) -> Any:
         if low in ("0", "false", "no", "off"):
             return False
         raise ValueError(f"{key} expects true/false, got {raw!r}")
-    if isinstance(default, int):
+    if isinstance(default, int) and not isinstance(default, bool):
         return int(raw)
-    if key == "access" and raw not in ACCESS_MODES:
-        raise ValueError(f"access must be one of {ACCESS_MODES}")
+    if isinstance(default, float):
+        return float(raw)
+    if key in ("access", "human_access") and raw not in ACCESS_MODES:
+        raise ValueError(f"{key} must be one of {ACCESS_MODES}")
+    if key == "bot_access" and raw not in BOT_ACCESS_MODES:
+        raise ValueError(f"bot_access must be one of {BOT_ACCESS_MODES}")
+    if key in LIST_KEYS:
+        return [v.strip() for v in raw.replace(",", " ").split() if v.strip()]
+    if isinstance(default, (list, dict)):
+        value = json.loads(raw)
+        if not isinstance(value, type(default)):
+            raise ValueError(f"{key} expects a JSON {type(default).__name__}")
+        return value
     if key in ("ack_reaction", "error_reaction"):
         return raw.strip().strip(":")
     return raw

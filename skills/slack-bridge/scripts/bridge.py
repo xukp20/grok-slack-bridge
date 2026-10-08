@@ -35,6 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
+import access  # noqa: E402
 import common  # noqa: E402
 import events  # noqa: E402
 import store as storemod  # noqa: E402
@@ -44,11 +45,13 @@ log = logging.getLogger("slack-bridge")
 
 
 class Decision:
-    def __init__(self, action: str, reason: str = "", entry: str = "", reply_text: str = ""):
+    def __init__(self, action: str, reason: str = "", entry: str = "", reply_text: str = "",
+                 verdict: access.Verdict | None = None):
         self.action = action        # forward | ignore
         self.reason = reason
         self.entry = entry          # dm | mention | thread_follow | channel | slash_command
         self.reply_text = reply_text
+        self.verdict = verdict
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"Decision({self.action}, {self.reason!r}, {self.entry})"
@@ -81,6 +84,7 @@ class Bridge:
         self.viewing: dict[str, dict] = {}
         self.sessions_unavailable_logged = False
         self.delivery_thread: threading.Thread | None = None
+        self.denied_at: dict[str, float] = {}
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None:
@@ -151,6 +155,8 @@ class Bridge:
                 continue
             log.info("deciding receipt %s left in 'received' before the restart", row["op_id"])
             self.process(msg, row["thread_key"])
+        for problem in access.validate(self.cfg):
+            log.warning("config: %s", problem)
         self.on_startup(recovered)
         self.delivery_thread = threading.Thread(target=self.delivery_loop, name="delivery", daemon=True)
         self.delivery_thread.start()
@@ -215,9 +221,21 @@ class Bridge:
         # Ack first, always, so Slack does not retry. The receipt is persisted
         # next; a crash between ack and receipt is the only loss window, and
         # thread catch-up covers followed threads.
+        if req.type == "slash_commands":
+            # Decide synchronously so the ack can carry the (ephemeral) answer.
+            try:
+                text = self.handle_slash(req.payload)
+            except Exception:
+                log.exception("slash command failed")
+                text = self.cfg.get("error_text") or common.DEFAULT_CONFIG["error_text"]
+            client.send_socket_mode_response(SocketModeResponse(
+                envelope_id=req.envelope_id, payload={"response_type": "ephemeral", "text": text}))
+            return
         client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
         if req.type == "events_api":
             self.pool.submit(self.handle_envelope, req.payload)
+        elif req.type == "interactive":
+            self.pool.submit(self.handle_interactive_safe, req.payload)
         else:
             log.debug("ignoring socket request type %s", req.type)
 
@@ -268,19 +286,40 @@ class Bridge:
         decision = self.decide(msg, thread)
         return self.apply_decision(msg, thread, decision)
 
-    def decide(self, msg: events.Msg, thread: dict) -> Decision:
-        """Stage-1 policy: humans in DMs and @mentions; bots never."""
-        owner = self.cfg.get("owner_user_id") or ""
-        if msg.actor_type == "bot":
-            return Decision("ignore", "bot messages are not accepted")
-        if self.cfg.get("access") == "owner_only" and owner and msg.user != owner:
-            return Decision("ignore", "access=owner_only", reply_text=self.cfg.get("deny_message", "")
-                            if msg.is_dm else "")
+    def entry_for(self, msg: events.Msg, thread: dict, policy: dict) -> str | None:
+        """How this message addresses the bot (None = it does not)."""
+        if msg.event_type == "slash_command":
+            return "slash_command"
         if msg.is_dm:
-            return Decision("forward", "dm", entry="dm")
+            return "dm"
         if msg.mentions_bot:
-            return Decision("forward", "mention", entry="mention")
-        return Decision("ignore", "trigger=mention: not mentioned")
+            return "mention"
+        return None
+
+    def decide(self, msg: events.Msg, thread: dict) -> Decision:
+        """Access first (same check for every entry point), then trigger."""
+        policy = access.effective_policy(self.cfg, msg.channel)
+        entry = self.entry_for(msg, thread, policy)
+        verdict = access.check(self.cfg, self.ident, msg.actor_obj(), channel=msg.channel,
+                               root_ts=msg.root_ts, entry=entry or "channel")
+        if not verdict.allowed:
+            return Decision("ignore", f"refused: {verdict.reason}", verdict=verdict,
+                            reply_text=self.deny_text(msg, entry))
+        if entry is None:
+            return Decision("ignore", f"trigger={policy['trigger']}: not addressed to the bot",
+                            verdict=verdict)
+        return Decision("forward", verdict.reason, entry=entry, verdict=verdict)
+
+    def deny_text(self, msg: events.Msg, entry: str | None) -> str:
+        """Fixed refusal text: humans only, DMs/commands only, at most once per hour per user."""
+        if msg.actor_type != "human" or entry not in ("dm", "slash_command"):
+            return ""
+        text = self.cfg.get("deny_message") or ""
+        last = self.denied_at.get(msg.user, 0)
+        if not text or time.time() - last < 3600:
+            return ""
+        self.denied_at[msg.user] = time.time()
+        return text
 
     def apply_decision(self, msg: events.Msg, thread: dict, decision: Decision) -> str:
         if decision.action != "forward":
@@ -293,18 +332,98 @@ class Bridge:
         thread = self.store.update_thread(thread["thread_key"], following=1) or thread
         session = self.open_session(msg)
         reaction = self.cfg.get("ack_reaction") if self.cfg.get("react_on_receipt") else ""
-        if reaction and not session and not self.dry_run and self.web is not None:
+        if reaction and msg.ts and not session and not self.dry_run and self.web is not None:
             self._safe(self.web.reactions_add, channel=msg.channel, timestamp=msg.ts, name=reaction)
         payload = common.build_payload(
             msg, self.cfg, self.public_home, entry=decision.entry, thread=thread,
             user_info=self.user_info(msg.user), session=session,
-            viewing=self.viewing.get(msg.user))
+            viewing=self.viewing.get(msg.user),
+            permissions=decision.verdict.permissions if decision.verdict else None)
         if self.dry_run:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         self.store.transition(msg.op_id, "queued", decision.reason, payload=payload,
                               task_id=thread.get("task_id"))
         self.wake.set()
         return "queued"
+
+    # -- slash commands and buttons (same access check) ---------------------
+    def slash_actor(self, payload: dict) -> access.Actor:
+        return access.Actor(user=payload.get("user_id") or "", team_id=str(payload.get("team_id") or ""),
+                            api_app_id=str(payload.get("api_app_id") or ""), is_bot=False)
+
+    def handle_slash(self, payload: dict) -> str:
+        """Returns the ephemeral text shown to the invoking user."""
+        self.cfg = common.load_config(self.home)
+        actor = self.slash_actor(payload)
+        verdict = access.check(self.cfg, self.ident, actor, channel=payload.get("channel_id") or "",
+                               entry="slash_command")
+        log.info("slash command %s by %s in %s: %s", payload.get("command"), actor.user,
+                 payload.get("channel_id"), "allowed" if verdict.allowed else verdict.reason)
+        if not verdict.allowed:
+            return self.cfg.get("deny_message") or "Not allowed."
+        text = (payload.get("text") or "").strip()
+        if not text:
+            return self.cfg.get("slash_usage_text") or common.DEFAULT_CONFIG["slash_usage_text"]
+        dm = self.dm_channel(actor.user)
+        if not dm:
+            return self.cfg.get("error_text") or common.DEFAULT_CONFIG["error_text"]
+        msg = events.slash_message(payload, dm)
+        self.pool.submit(self._record_and_process, msg, {"slash": payload})
+        return self.cfg.get("slash_ack_text") or common.DEFAULT_CONFIG["slash_ack_text"]
+
+    def dm_channel(self, user: str) -> str:
+        if self.web is None:
+            return "D-" + user
+        try:
+            return (self.web.conversations_open(users=user).get("channel") or {}).get("id", "")
+        except Exception as exc:
+            log.warning("conversations.open failed: %s", common.slack_error_code(exc))
+            return ""
+
+    def _record_and_process(self, msg: events.Msg, envelope: dict) -> str:
+        tkey = msg.thread_key(self.ident)
+        status, row = self.store.record(msg.op_id, msg.fingerprint, msg_key=msg.msg_key,
+                                        kind=msg.event_type, team_id=msg.team_id, channel=msg.channel,
+                                        ts=msg.ts, thread_key=tkey, actor=msg.actor,
+                                        actor_type=msg.actor_type, envelope=None)
+        if status != "new":
+            return status
+        return self.process(msg, tkey)
+
+    def handle_interactive_safe(self, payload: dict) -> None:
+        try:
+            self.handle_interactive(payload)
+        except Exception:
+            log.exception("interactive payload failed")
+
+    def handle_interactive(self, payload: dict) -> list[str]:
+        """Buttons: every action goes through the same access check."""
+        self.cfg = common.load_config(self.home)
+        if payload.get("type") != "block_actions":
+            return []
+        user = payload.get("user") or {}
+        team = (payload.get("team") or {}).get("id") or user.get("team_id") or ""
+        actor = access.Actor(user=user.get("id") or "", team_id=team,
+                             user_team=user.get("team_id") or "",
+                             api_app_id=str(payload.get("api_app_id") or ""), is_bot=False)
+        channel = (payload.get("channel") or {}).get("id") or (payload.get("container") or {}).get("channel_id", "")
+        message = payload.get("message") or {}
+        root = message.get("thread_ts") or message.get("ts") or ""
+        results = []
+        for action in payload.get("actions") or []:
+            action_id = action.get("action_id") or ""
+            verdict = access.check(self.cfg, self.ident, actor, channel=channel, root_ts=root, entry="button")
+            if not verdict.allowed:
+                log.info("button %s refused for %s: %s", action_id, actor.user, verdict.reason)
+                results.append("refused")
+                continue
+            results.append(self.run_button(action_id, action.get("value") or "", actor, channel, root, verdict))
+        return results
+
+    def run_button(self, action_id: str, value: str, actor: access.Actor, channel: str, root: str,
+                   verdict: access.Verdict) -> str:
+        log.info("button %s by %s (no handler)", action_id, actor.user)
+        return "unsupported"
 
     def reply_thread(self, msg: events.Msg) -> str | None:
         return common.reply_target(msg.raw, bool(self.cfg.get("dm_reply_in_thread")))["thread_ts"]
@@ -461,6 +580,8 @@ class Bridge:
         if msg.actor_type != "human":
             return None
         thread_ts = msg.root_ts
+        if not thread_ts:
+            return None
         title = "" if msg.thread_ts else common.session_title(msg.text, self.cfg.get("session_title_chars", 60))
         resp = self.set_session_status(msg.channel, thread_ts, "processing",
                                        title=title, initiator_user_id=msg.user)

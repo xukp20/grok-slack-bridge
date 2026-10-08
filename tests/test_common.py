@@ -57,7 +57,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(common.coerce_config_value("webhook_retries", "5"), 5)
         self.assertEqual(common.coerce_config_value("ack_reaction", ":eyes:"), "eyes")
         with self.assertRaises(ValueError):
-            common.coerce_config_value("access", "anyone")
+            common.coerce_config_value("human_access", "anyone")
 
     def test_example_config_matches_defaults(self):
         example = json.loads((ROOT / "skills/slack-bridge/config.example.json").read_text())

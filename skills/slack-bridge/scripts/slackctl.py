@@ -484,9 +484,84 @@ def cmd_thread(args) -> int:
     messages = resp.get("messages") or []
     if not args.ts:
         messages = list(reversed(messages))
+    cfg = common.load_config(common.resolve_home(args.home))
+    hidden = 0
     for m in messages:
+        if not args.include_refused and not context_visible(cfg, m, args.channel, args.ts or m.get("ts", "")):
+            hidden += 1
+            continue
         who = m.get("user") or m.get("bot_id") or "?"
         print(f"[{m.get('ts')}] {who}: {m.get('text', '')}")
+    if hidden:
+        print(f"({hidden} message(s) from senders the access policy refuses were hidden; "
+              "--include-refused shows them)")
+    return 0
+
+
+def context_visible(cfg: dict, m: dict, channel: str, root_ts: str) -> bool:
+    """Refused senders' messages stay out of the model's context by default."""
+    import access
+    ident = _ident(cfg)
+    bot_id, app_id = m.get("bot_id") or "", m.get("app_id") or ""
+    if (cfg.get("bot_user_id") and m.get("user") == cfg.get("bot_user_id")) or \
+            (ident.app_id and app_id == ident.app_id):
+        return True  # our own messages
+    actor = access.Actor(user=m.get("user") or "", bot_id=bot_id, app_id=app_id,
+                         is_bot=bool(bot_id or app_id or m.get("subtype") == "bot_message"),
+                         team_id=ident.team_id, api_app_id=ident.app_id,
+                         user_team="" if (bot_id or app_id) else (m.get("user_team") or m.get("team") or ""))
+    entry = "dm" if channel.startswith("D") else "thread_follow"
+    return access.check(cfg, ident, actor, channel=channel, root_ts=root_ts, entry=entry).allowed
+
+
+def _ident(cfg: dict):
+    import events
+    return events.Identity(team_id=cfg.get("team_id") or "", app_id=cfg.get("app_id") or "",
+                           bot_user_id=cfg.get("bot_user_id") or "", bot_id="")
+
+
+def cmd_access(args) -> int:
+    """Explain what the access policy decides for an actor (no Slack calls)."""
+    import access
+    cfg = common.load_config(common.resolve_home(args.home))
+    ident = _ident(cfg)
+    if args.action == "validate":
+        problems = access.validate(cfg)
+        for p in problems:
+            print(f"- {p}")
+        print("ok" if not problems else f"{len(problems)} problem(s)")
+        return 1 if problems else 0
+    actor = access.Actor(user=args.user or "", bot_id=args.bot_id or "", app_id=args.app_id or "",
+                         is_bot=bool(args.bot_id or args.app_id), team_id=args.team or ident.team_id,
+                         api_app_id=args.api_app_id or ident.app_id)
+    v = access.check(cfg, ident, actor, channel=args.channel or "", root_ts=args.thread_ts or "",
+                     entry=args.entry)
+    print(json.dumps({"allowed": v.allowed, "reason": v.reason, "role": v.role,
+                      "permissions": v.permissions,
+                      "policy": {k: (sorted(x) if isinstance(x, set) else x) for k, x in v.policy.items()}},
+                     indent=2, ensure_ascii=False))
+    return 0 if v.allowed else 3
+
+
+def cmd_migrate_config(args) -> int:
+    home = common.resolve_home(args.home)
+    path = common.config_path(home)
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    new, notes = common.migrate_config(data)
+    for n in notes:
+        print(f"- {n}")
+    if not notes:
+        print("config already up to date")
+        return 0
+    if args.dry_run:
+        print("(dry run; nothing written)")
+        return 0
+    backup = path.with_name(f"config.json.bak-{int(time.time())}")
+    if path.exists():
+        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"backup: {backup}")
+    common.save_config(home, new)
+    print(f"updated {path}")
     return 0
 
 
@@ -623,6 +698,16 @@ def cmd_doctor(args) -> int:
         add(False, "config.json", f"unreadable: {exc}")
     add(bool(cfg.get("owner_user_id")) or None, "owner_user_id",
         cfg.get("owner_user_id") or "unset (scripts/set-owner.sh U…); payloads will say is_owner=false")
+    try:
+        import access
+        problems = access.validate(cfg)
+        add(None if problems else True, "access policy",
+            "; ".join(problems) if problems else
+            f"human_access={cfg.get('human_access')} bot_access={cfg.get('bot_access')} "
+            f"bot_allowlist={len(cfg.get('bot_allowlist') or [])} "
+            f"overrides={len(cfg.get('channel_overrides') or {})}")
+    except Exception as exc:
+        add(False, "access policy", str(exc))
 
     # env
     for name in common.REQUIRED_ENV:
@@ -743,7 +828,26 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--channel", required=True)
     t.add_argument("--ts")
     t.add_argument("--limit", type=int, default=30)
+    t.add_argument("--include-refused", action="store_true",
+                   help="also show messages from senders the access policy refuses")
     t.set_defaults(func=cmd_thread)
+
+    ac = sub.add_parser("access", help="explain the access decision for an actor, or validate config")
+    ac.add_argument("action", choices=("check", "validate"))
+    ac.add_argument("--user")
+    ac.add_argument("--bot-id")
+    ac.add_argument("--app-id")
+    ac.add_argument("--channel")
+    ac.add_argument("--thread-ts")
+    ac.add_argument("--entry", default="mention", choices=("dm", "mention", "thread_follow", "channel",
+                                                          "slash_command", "button"))
+    ac.add_argument("--team", help="envelope team id (default: our team)")
+    ac.add_argument("--api-app-id", help="envelope app id (default: our app)")
+    ac.set_defaults(func=cmd_access)
+
+    mc = sub.add_parser("migrate-config", help="convert legacy keys to the explicit access policy")
+    mc.add_argument("--dry-run", action="store_true")
+    mc.set_defaults(func=cmd_migrate_config)
 
     se = sub.add_parser("session", help="set an agent session's status and/or title")
     se.add_argument("--channel", required=True)

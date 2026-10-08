@@ -315,8 +315,30 @@ def finish_op(st, op_id: str, state: str, reason: str) -> str:
         return "unknown"
     if row["state"] in ("accepted", "needs-reconciliation", "unknown-result"):
         st.transition(op_id, state, reason)
+        thread = st.thread(row["thread_key"]) if row.get("thread_key") else None
+        if thread and thread["state"] in ("active", "completed", "no_reply"):
+            st.update_thread(row["thread_key"], state=state, state_reason=reason)
         return state
     return row["state"]
+
+
+def stop_gate(st, op_id: str | None, channel: str, thread_ts: str | None) -> str | None:
+    """Why a reply must not be sent (operation or thread stopped), else None."""
+    if st is None:
+        return None
+    if op_id:
+        row = st.get(op_id)
+        if row and row["state"] == "stopped":
+            return f"operation {op_id} was stopped ({row.get('reason') or 'stop'})"
+        if row and row.get("thread_key"):
+            t = st.thread(row["thread_key"])
+            if t and t["state"] == "stopped":
+                return f"thread was stopped ({t.get('state_reason') or 'stop'})"
+    if thread_ts:
+        t = st.find_thread(channel, thread_ts)
+        if t and t["state"] == "stopped":
+            return f"thread was stopped ({t.get('state_reason') or 'stop'})"
+    return None
 
 
 def clear_ack(client, cfg: dict, channel: str, ack_ts: str | None, ack_reaction: str | None,
@@ -339,10 +361,17 @@ def clear_ack(client, cfg: dict, channel: str, ack_ts: str | None, ack_reaction:
 def cmd_reply(args) -> int:
     home = common.resolve_home(args.home)
     cfg = common.load_config(home)
-    st = open_store_quiet(home) if args.op else None
+    st = open_store_quiet(home)
+    gate = None if args.force else stop_gate(st, args.op, args.channel, args.thread_ts)
+    if gate and not args.no_reply:
+        # Stop wins: never post into a stopped task (use --force for a manual message).
+        print(json.dumps({"ok": False, "sent": False, "stopped": True, "reason": gate,
+                          "operation": args.op}))
+        return 3
     if args.no_reply:
         client = web_client()
-        state = finish_op(st, args.op, "no_reply", args.reason or "agent chose not to reply")
+        state = finish_op(st, args.op, "no_reply", args.reason or "agent chose not to reply") \
+            if not gate else "stopped"
         session = set_session(client, home, args.channel, args.thread_ts, args.session_status or "active") \
             if (args.session_status or args.thread_ts) else None
         clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, None)
@@ -808,6 +837,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-reply", action="store_true",
                    help="send nothing; record that the agent saw the message and chose not to reply")
     r.add_argument("--reason", help="note stored with --no-reply")
+    r.add_argument("--force", action="store_true",
+                   help="post even if the task/thread was stopped (manual messages only)")
     r.add_argument("--session-status", choices=SESSION_STATUSES + ("none",),
                    help="after posting, set the thread's agent session status: active (done, "
                         "the default in payload commands), processing (an interim 'working on "

@@ -102,6 +102,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "bot_denylist": [],
     "channel_allowlist": [],            # empty = every channel the bot is in
     "channel_overrides": {},            # {"C…": {...}} may only tighten access
+    # Triggers and loop control (stage 3)
+    "trigger": "mention",               # mention | thread_follow | all (DMs always count)
+    "max_bot_turns": 4,                 # forwarded bot messages per thread task
+    "bot_cooldown_seconds": 10,         # min gap between forwarded bot messages in a thread
+    "command_words": {
+        "stop": ["stop", "停", "停止", "别回了"],
+        "new": ["new", "new task", "新任务"],
+        "resume": ["resume", "继续"],
+    },
+    "new_task_message": "OK, new task. Bot turn counter reset.",
+    "resume_message": "Resumed.",
     "deny_message": "Sorry, I only take requests from my owner here.",
     "error_text": "Sorry, something went wrong on my side. The owner can check the bridge log.",
     "slash_ack_text": "Got it. I'll answer in our DM.",

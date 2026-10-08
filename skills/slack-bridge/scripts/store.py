@@ -359,9 +359,43 @@ class Store:
         with self.lock:
             cur = self.db.execute(
                 "UPDATE threads SET state='paused', state_reason=?, state_at=?, updated_at=? "
-                "WHERE bot_turns>0 AND state IN ('active','completed')",
+                "WHERE bot_turns>0 AND state IN ('active','completed','no_reply')",
                 (reason, self.now(), self.now()))
             return cur.rowcount
+
+    def open_ops(self, key: str) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM receipts WHERE thread_key=? AND state IN "
+                "('received','queued','submitted','accepted','unknown-result','needs-reconciliation') "
+                "ORDER BY id", (key,)).fetchall()]
+
+    def stop_thread(self, key: str, reason: str = "stopped") -> list[str]:
+        """Thread -> stopped; every open operation in it -> stopped (no later replies).
+
+        'submitted' operations are in flight; the delivery worker stops them as
+        soon as the webhook call returns.
+        """
+        self.update_thread(key, state="stopped", state_reason=reason, state_at=self.now())
+        stopped = []
+        for op in self.open_ops(key):
+            if op["state"] == "submitted":
+                continue
+            try:
+                self.transition(op["op_id"], "stopped", reason)
+                stopped.append(op["op_id"])
+            except TransitionError:
+                pass
+        return stopped
+
+    def channel_threads(self, channel: str, states: Iterable[str] | None = None) -> list[dict]:
+        with self.lock:
+            q, args = "SELECT * FROM threads WHERE channel=?", [channel]
+            if states:
+                states = list(states)
+                q += f" AND state IN ({','.join('?' * len(states))})"
+                args += states
+            return [dict(r) for r in self.db.execute(q + " ORDER BY updated_at DESC", args).fetchall()]
 
     def following_threads(self, since: float) -> list[dict]:
         with self.lock:

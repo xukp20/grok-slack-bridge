@@ -25,6 +25,7 @@ import atexit
 import importlib.util
 import json
 import logging
+import re
 import os
 import signal
 import sys
@@ -46,8 +47,12 @@ log = logging.getLogger("slack-bridge")
 
 class Decision:
     def __init__(self, action: str, reason: str = "", entry: str = "", reply_text: str = "",
-                 verdict: access.Verdict | None = None):
-        self.action = action        # forward | ignore
+                 verdict: access.Verdict | None = None, command: str = "", not_before: float = 0,
+                 reactivate: bool = False):
+        self.command = command
+        self.not_before = not_before
+        self.reactivate = reactivate
+        self.action = action        # forward | ignore | command
         self.reason = reason
         self.entry = entry          # dm | mention | thread_follow | channel | slash_command
         self.reply_text = reply_text
@@ -65,6 +70,7 @@ class Bridge:
         self.now = now
         self.cfg = common.load_config(self.home)
         self.store = storemod.open_store(self.home)
+        self.store.now = now
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="evt")
         self.user_cache: dict[str, dict] = {}
         self.stats = {"received": 0, "forwarded": 0, "skipped": 0, "failed": 0}
@@ -138,6 +144,9 @@ class Bridge:
     def start_workers(self) -> None:
         """Recover persisted state and start the delivery worker."""
         recovered = self.store.recover_after_restart()
+        paused = self.store.pause_bot_threads("bridge restarted; bot conversations wait for a human")
+        if paused:
+            log.info("paused %d thread(s) with bot activity until a human continues them", paused)
         if recovered:
             log.warning("%d operation(s) were in flight when the bridge stopped; marked "
                         "needs-reconciliation (not replayed): %s", len(recovered),
@@ -294,10 +303,40 @@ class Bridge:
             return "dm"
         if msg.mentions_bot:
             return "mention"
+        in_thread = bool(msg.thread_ts) and msg.thread_ts != msg.ts
+        if policy["trigger"] in ("thread_follow", "all") and in_thread and thread.get("following"):
+            return "thread_follow"
+        if policy["trigger"] == "all":
+            return "channel"
         return None
 
+    COMMAND_STRIP = " \t\n!！.。,，?？~～:：-"
+
+    def command_of(self, msg: events.Msg, thread: dict, entry: str | None,
+                   verdict: access.Verdict) -> str:
+        """stop / new / resume as a bare text command from a human (never from bots)."""
+        if msg.actor_type != "human":
+            return ""
+        in_followed_thread = bool(msg.thread_ts) and bool(thread.get("following"))
+        if entry is None and not in_followed_thread:
+            return ""
+        text = re.sub(r"<@[A-Z0-9]+(\|[^>]*)?>", " ", msg.text or "")
+        text = " ".join(text.split()).strip(self.COMMAND_STRIP).lower()
+        if not text or len(text) > 20:
+            return ""
+        words = self.cfg.get("command_words") or common.DEFAULT_CONFIG["command_words"]
+        for cmd in ("stop", "new", "resume"):
+            if text in {str(w).lower() for w in words.get(cmd, [])}:
+                if cmd in ("new", "resume") and verdict.role != "owner":
+                    return ""  # just a normal message from a non-owner
+                if cmd == "resume" and entry is None:
+                    return ""
+                return cmd
+        return ""
+
     def decide(self, msg: events.Msg, thread: dict) -> Decision:
-        """Access first (same check for every entry point), then trigger."""
+        """Access first (same check for every entry point), then commands, task state,
+        trigger and bot loop limits."""
         policy = access.effective_policy(self.cfg, msg.channel)
         entry = self.entry_for(msg, thread, policy)
         verdict = access.check(self.cfg, self.ident, msg.actor_obj(), channel=msg.channel,
@@ -305,10 +344,71 @@ class Bridge:
         if not verdict.allowed:
             return Decision("ignore", f"refused: {verdict.reason}", verdict=verdict,
                             reply_text=self.deny_text(msg, entry))
+        cmd = self.command_of(msg, thread, entry, verdict)
+        if cmd:
+            return Decision("command", f"command: {cmd}", entry=entry or "thread_follow",
+                            verdict=verdict, command=cmd)
         if entry is None:
             return Decision("ignore", f"trigger={policy['trigger']}: not addressed to the bot",
                             verdict=verdict)
-        return Decision("forward", verdict.reason, entry=entry, verdict=verdict)
+        state = thread.get("state") or "active"
+        reactivate = False
+        if state in ("stopped", "paused"):
+            if msg.actor_type == "bot":
+                return Decision("ignore", f"thread {state}: bots wait until a human continues it",
+                                verdict=verdict)
+            if entry not in ("dm", "mention", "slash_command"):
+                return Decision("ignore", f"thread {state}: mention the bot to continue", verdict=verdict)
+            reactivate = True
+        not_before = 0.0
+        if msg.actor_type == "bot":
+            limit = int(policy["max_bot_turns"])
+            if verdict.bot_entry and verdict.bot_entry.get("max_turns") not in (None, ""):
+                limit = min(limit, int(verdict.bot_entry["max_turns"]))
+            turns = int(thread.get("bot_turns") or 0)
+            if turns >= limit:
+                return Decision("ignore", f"max_bot_turns reached ({turns}/{limit}); the owner can "
+                                "say 'new' to start a new task", verdict=verdict)
+            last = float(thread.get("last_bot_at") or 0)
+            cooldown = float(policy["bot_cooldown_seconds"])
+            if last and self.now() - last < cooldown:
+                not_before = last + cooldown
+        return Decision("forward", verdict.reason, entry=entry, verdict=verdict,
+                        not_before=not_before, reactivate=reactivate)
+
+    def command_targets(self, msg: events.Msg, thread: dict, cmd: str) -> list[dict]:
+        """The thread a command is about; top-level commands cover the channel's open work."""
+        if msg.thread_ts and msg.thread_ts != msg.ts:
+            return [thread]
+        if cmd == "stop":
+            return [t for t in self.store.channel_threads(msg.channel)
+                    if t["state"] != "stopped" and self.store.open_ops(t["thread_key"])] + [thread]
+        return [t for t in self.store.channel_threads(msg.channel, ("stopped", "paused"))] + [thread]
+
+    def run_command(self, msg: events.Msg, thread: dict, decision: Decision) -> str:
+        cmd = decision.command
+        self.store.transition(msg.op_id, "ignored", decision.reason)
+        targets = {t["thread_key"]: t for t in self.command_targets(msg, thread, cmd)}
+        log.info("command %s by %s in %s covers %d thread(s)", cmd, msg.actor, msg.channel, len(targets))
+        if cmd == "stop":
+            stopped = []
+            for key, t in targets.items():
+                stopped += self.store.stop_thread(key, f"stop from {msg.actor}")
+                if t.get("root_ts"):
+                    common.mark_stopped(self.home, t["channel"], t["root_ts"])
+            log.info("stopped operations: %s", ", ".join(stopped) or "none")
+            text = self.cfg.get("stop_message")
+        elif cmd == "new":
+            for key in targets:
+                self.store.new_task(key, f"new task from {msg.actor}")
+            text = self.cfg.get("new_task_message")
+        else:
+            for key in targets:
+                self.store.update_thread(key, state="active", state_reason=f"resumed by {msg.actor}")
+            text = self.cfg.get("resume_message")
+        if text and not self.dry_run:
+            self.notify(msg.channel, self.reply_thread(msg), text)
+        return f"command:{cmd}"
 
     def deny_text(self, msg: events.Msg, entry: str | None) -> str:
         """Fixed refusal text: humans only, DMs/commands only, at most once per hour per user."""
@@ -322,6 +422,8 @@ class Bridge:
         return text
 
     def apply_decision(self, msg: events.Msg, thread: dict, decision: Decision) -> str:
+        if decision.action == "command":
+            return self.run_command(msg, thread, decision)
         if decision.action != "forward":
             self.stats["skipped"] += 1
             self.store.transition(msg.op_id, "ignored", decision.reason)
@@ -329,7 +431,12 @@ class Bridge:
             if decision.reply_text and not self.dry_run:
                 self.notify(msg.channel, self.reply_thread(msg), decision.reply_text)
             return f"ignored:{decision.reason}"
-        thread = self.store.update_thread(thread["thread_key"], following=1) or thread
+        updates = {"following": 1}
+        if decision.reactivate:
+            updates.update(state="active", state_reason=f"continued by {msg.actor} ({decision.entry})")
+        thread = self.store.update_thread(thread["thread_key"], **updates) or thread
+        if msg.actor_type == "bot":
+            thread = self.store.add_bot_turn(thread["thread_key"]) or thread
         session = self.open_session(msg)
         reaction = self.cfg.get("ack_reaction") if self.cfg.get("react_on_receipt") else ""
         if reaction and msg.ts and not session and not self.dry_run and self.web is not None:
@@ -342,7 +449,7 @@ class Bridge:
         if self.dry_run:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         self.store.transition(msg.op_id, "queued", decision.reason, payload=payload,
-                              task_id=thread.get("task_id"))
+                              task_id=thread.get("task_id"), not_before=decision.not_before or None)
         self.wake.set()
         return "queued"
 
@@ -458,6 +565,9 @@ class Bridge:
         attempts = op["attempts"] + 1
         if result.outcome == "accepted":
             self.store.transition(op["op_id"], "accepted", f"HTTP {result.status}")
+            thread = self.store.thread(op["thread_key"]) if op.get("thread_key") else None
+            if thread and thread["state"] == "stopped":  # stopped while in flight
+                self.store.transition(op["op_id"], "stopped", "thread stopped while submitting")
             self.stats["forwarded"] += 1
             log.info("forwarded %s -> HTTP %s", op["op_id"], result.status)
             self.on_delivery_result(op, "accepted", result)
@@ -488,7 +598,12 @@ class Bridge:
         return "failed"
 
     def before_submit(self, op: dict) -> tuple[str, str] | None:
-        """Last check before sending (stage 3: stop). None = go ahead."""
+        """Last check before sending: stop wins. None = go ahead."""
+        thread = self.store.thread(op["thread_key"]) if op.get("thread_key") else None
+        if thread and thread["state"] == "stopped":
+            return ("stopped", f"thread stopped before submit ({thread.get('state_reason') or 'stop'})")
+        if thread and thread["state"] == "paused" and op.get("actor_type") == "bot":
+            return ("ignored", f"thread paused before submit ({thread.get('state_reason') or ''})")
         return None
 
     def on_delivery_result(self, op: dict, state: str, result) -> None:
@@ -608,16 +723,28 @@ class Bridge:
                 self.viewing[user] = {"channel_ids": channels, "updated_at": int(time.time())}
             log.info("context changed user=%s channels=%s", user or "?", channels)
         elif etype == "agent_session_stopped":
-            self.on_session_stopped(event)
+            self.on_session_stopped(event, envelope)
         elif etype == "app_home_opened":
             log.debug("app home opened user=%s tab=%s", event.get("user"), event.get("tab"))
         elif etype == "agent_session_title_changed":
             log.info("session renamed channel=%s thread=%s", event.get("channel"), event.get("thread_ts"))
 
-    def on_session_stopped(self, event: dict) -> None:
+    def on_session_stopped(self, event: dict, envelope: dict | None = None) -> None:
         channel, thread_ts = event.get("channel"), event.get("thread_ts")
         log.info("session stop requested channel=%s thread=%s by %s", channel, thread_ts, event.get("user"))
-        if self.dry_run or not channel or not thread_ts:
+        if not channel or not thread_ts:
+            return
+        envelope = envelope or {}
+        actor = access.Actor(user=event.get("user") or "", team_id=str(envelope.get("team_id") or ""),
+                             api_app_id=str(envelope.get("api_app_id") or ""))
+        verdict = access.check(self.cfg, self.ident, actor, channel=channel, root_ts=thread_ts, entry="button")
+        if not verdict.allowed:
+            log.info("session stop refused: %s", verdict.reason)
+            return
+        key = storemod.thread_key(self.ident.team_id, channel, thread_ts, self.ident.app_id)
+        self.store.ensure_thread(key, self.ident.team_id, channel, thread_ts, self.ident.app_id)
+        self.store.stop_thread(key, f"agent view Stop by {actor.user}")
+        if self.dry_run:
             return
         self.set_session_status(channel, thread_ts, "active")
         msg = self.cfg.get("stop_message")

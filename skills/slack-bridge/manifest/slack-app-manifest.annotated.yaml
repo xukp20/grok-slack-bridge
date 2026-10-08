@@ -1,0 +1,84 @@
+# Annotated copy of slack-app-manifest.yaml: same content, with the reason
+# for every line. Paste the plain slack-app-manifest.yaml into Slack (Create
+# New App -> From a manifest, or App Manifest -> Edit); regenerate with
+#   scripts/slackctl.sh render-manifest --name "My Bot" [--no-agent-view] [--format json]
+# tests/test_common.py checks that this file parses to the same manifest.
+#
+# YAML rules that bite:
+#  - quote any value starting with # [ { * & ! | > ' " % @ ` or containing
+#    ": " - "#111827" would otherwise be a comment, "[question]" a list;
+#  - indent with spaces only, two per level; list items "- x" line up;
+#  - booleans are true/false (unquoted); quote yes/no/on/off strings;
+#  - after changing scopes or events, Slack asks you to reinstall the app;
+#    the bot keeps its old scopes until you do.
+
+display_information:
+  name: Grok Bot                      # app name in the app directory and the agent pane
+  description: Chat with your Grok Bot assistant from Slack.
+  background_color: "#111827"         # quoted: '#' starts a YAML comment
+features:
+  app_home:
+    home_tab_enabled: false           # the bridge does not render a Home tab
+    messages_tab_enabled: true        # DMs with the bot (required for DMs)
+    messages_tab_read_only_enabled: false   # false = people can write to the bot
+    agent_tasks_enabled: true         # agent view: one thread per task, "Working…" + Stop
+  bot_user:
+    display_name: Grok Bot            # @-name people mention
+    always_online: true
+  slash_commands:
+    - command: "/grok"                # quoted; Socket Mode needs no request URL
+      description: Ask Grok Bot
+      usage_hint: "[question or task]"   # quoted: '[' starts a YAML list
+      should_escape: false            # pass <@U…>/<#C…> through unchanged
+  agent_view:                         # omit (render-manifest --no-agent-view) for a plain bot
+    agent_description: Chat with your Grok Bot assistant from Slack.
+    suggested_prompts:                # up to 4, shown in a new agent thread
+      - title: "What can you do?"     # quoted: '?' and ':' are safer quoted
+        message: "What can you help me with here in Slack?"
+      - title: Summarize this channel
+        message: Summarize the recent discussion in the channel I'm looking at.
+      - title: Draft a reply
+        message: Help me draft a reply to the latest message.
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read             # app_mention events
+      - assistant:write               # agent sessions: status, title, suggested prompts
+      - canvases:read                 # optional agent tools
+      - canvases:write
+      - channels:history              # message.channels: followed threads, catch-up
+      - channels:read
+      - chat:write                    # replies (the bot must be a member: /invite @Grok Bot)
+      - commands                      # /grok
+      - files:read                    # download; without it url_private returns an HTML login page
+      - files:write                   # upload
+      - groups:history                # private channels (after /invite)
+      - groups:read
+      - im:history                    # DMs
+      - im:read
+      - im:write                      # conversations.open: /grok answers in the user's DM
+      - mpim:history                  # group DMs
+      - mpim:read
+      - reactions:read
+      - reactions:write               # 👀 receipt / ⚠️ failure reactions
+      - users.profile:read
+      - users:read                    # sender names in payloads
+      - users:read.email
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention                   # @Grok Bot in channels the bot is in
+      - message.im                    # DMs
+      - message.channels              # thread_follow / trigger=all / catch-up (public)
+      - message.groups                # same for private channels
+      - message.mpim                  # group DMs
+      - reaction_added
+      - app_home_opened               # needed for the agent view entry point to appear
+      - app_context_changed           # channel the user has open next to the agent
+      - agent_session_stopped         # the Stop button -> thread stopped
+      - agent_session_title_changed
+  interactivity:
+    is_enabled: false                 # set true only if you add buttons (Socket Mode: no URL)
+  org_deploy_enabled: false
+  socket_mode_enabled: true           # events over an outbound WebSocket; no public URL
+  token_rotation_enabled: false       # keep false: the bridge uses long-lived xoxb tokens

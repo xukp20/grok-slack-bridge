@@ -227,6 +227,11 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("app_home_opened", m["settings"]["event_subscriptions"]["bot_events"])
         self.assertLessEqual(len(m["features"]["agent_view"]["suggested_prompts"]), 4)
 
+    def test_annotated_manifest_matches(self):
+        import yaml
+        annotated = yaml.safe_load((self.MDIR / "slack-app-manifest.annotated.yaml").read_text())
+        self.assertEqual(annotated, json.loads((self.MDIR / "slack-app-manifest.json").read_text()))
+
     def test_plain_manifest_has_no_agent_features(self):
         m = slackctl.build_manifest("Grok Bot", "d", agent_view=False)
         self.assertNotIn("agent_view", m["features"])

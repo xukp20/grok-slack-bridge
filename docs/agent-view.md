@@ -78,7 +78,7 @@ plan (or a Developer Program sandbox).
 | --- | --- |
 | `message.im` / `app_mention` | calls `agents.sessions.setStatus` with `status: processing` (title from the first message, `initiator_user_id` = sender) on the message's thread (`thread_ts`, or the message itself for a new conversation), then forwards the payload with `agent_session` set and `reply.thread_ts` = that thread |
 | `app_context_changed` | remembers the channel(s) the user is viewing; added to that user's next payloads as `viewing_context` |
-| `agent_session_stopped` | sets the session back to `active`, posts `stop_message` in the thread, and records the stop so a later `--session-status processing` does not re-open it |
+| `agent_session_stopped` | after the same access check as any other entry point: marks the thread `stopped` (queued and accepted operations become `stopped`, so `reply.sh` refuses to post there with exit code 3), sets the session back to `active`, posts `stop_message`, and records the stop so a later `--session-status processing` does not re-open it |
 | `app_home_opened` | logged only (Slack requires the subscription for agent view) |
 | `agent_session_title_changed` | logged only |
 
@@ -105,9 +105,11 @@ EOF
 scripts/slackctl.sh session --channel D0… --thread-ts 1712… --status active [--title "New title"]
 ```
 
-**Stop is advisory.** The agent run that is already in progress cannot be
-interrupted from Slack; Stop clears the status and tells the user, and a
-reply that was already being written may still arrive.
+**Stop cannot interrupt a run that is already working**, but it stops its
+output: the operation becomes `stopped`, `reply.sh --op` refuses to post
+into the thread (exit code 3), nothing queued is submitted, and later bot
+messages in the thread are ignored. Typing `stop` / `停` in the thread does
+the same. A new @mention or DM from an allowed person continues the thread.
 
 ## Config keys
 

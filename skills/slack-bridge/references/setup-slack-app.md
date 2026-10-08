@@ -47,12 +47,17 @@ Events: `app_mention`, `message.im`, `message.channels`, `message.groups`,
 (drop them and the scope with `render-manifest --no-agent-view` for a plain
 bot; that also drops `features.app_home.agent_tasks_enabled`).
 
-The channel-message and reaction events are subscribed ahead of bridge
-support for following threads without an @mention and for reaction triggers.
-Until that lands, the bridge acknowledges and drops them: plain channel
-messages are not forwarded unless they mention the bot, so the bot never acts
-on a channel uninvited. `/grok` invocations are likewise acknowledged but not
-yet forwarded.
+The channel-message events power `trigger: thread_follow` / `all`, thread
+catch-up after reconnects, and receipts for dedup. With the default
+`trigger: mention`, plain channel messages are recorded and ignored, so the
+bot never acts on a channel uninvited. `/grok` is answered in the user's DM
+(needs `im:write`), after the same access check as everything else.
+Reaction events are acknowledged and ignored.
+
+After installing: record the owner (`scripts/set-owner.sh U…`); only the
+owner is served until you open access ([configuration](configuration.md)).
+`/invite @Grok Bot` into every channel where it should answer. Common traps:
+[config-pitfalls.md](config-pitfalls.md).
 
 If you later add scopes or events, Slack asks you to **reinstall** the app;
 the bot token usually stays the same, but re-check with `doctor.sh`.

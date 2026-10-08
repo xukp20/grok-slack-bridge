@@ -14,15 +14,35 @@ with yours (`$SLACK_BRIDGE_HOME`).
 | **Agent shell or chat session ends** | No effect: `start.sh` detaches with `setsid nohup`. | None |
 
 Messages sent while no bridge is connected are **not** delivered later
-(Slack only retries Socket Mode events briefly). After an outage, ask people
-to resend, or read what was missed with
+(Slack only retries Socket Mode events briefly). After reconnecting, the
+bridge reads threads it follows (`catchup_window_hours`) and processes each
+missed message once; DMs and new top-level mentions are not caught up. After
+an outage, ask people to resend, or read what was missed with
 `scripts/slackctl.sh thread --channel <D…|C…>` (recent history).
+
+**Restarts never replay work.** Operations that were `submitted` or
+`accepted` when the bridge stopped become `needs-reconciliation`; a webhook
+timeout is `unknown-result`. Neither is resent automatically, because the
+agent may already be working on it. Decide per operation:
+
+```bash
+S=/workspace/slack-bot/scripts/slackctl.sh
+$S ops list --state needs-reconciliation --state unknown-result
+$S ops show Ev0123                          # history of state transitions
+$S ops resolve Ev0123 --to completed        # the agent answered (or --to no_reply / ignored)
+$S ops retry Ev0123 --force                 # the agent never got it: queue it once more
+```
+
+A late `reply.sh --op Ev0123` from the agent also completes it. Threads that
+had bot traffic are `paused` after a restart; bots stay ignored there until
+a human mentions the bot (or the owner says `resume`/`new`).
 
 ## Check
 
 ```bash
-/workspace/slack-bot/scripts/status.sh [N]      # running?, heartbeat age, connected, counters, last N log lines
-/workspace/slack-bot/scripts/doctor.sh          # env vars, bot token (auth.test), app token, webhook TLS, process
+/workspace/slack-bot/scripts/status.sh [N]      # process health (pid, heartbeat, connected) and task state, last N log lines
+/workspace/slack-bot/scripts/slackctl.sh health --json   # the same, machine-readable
+/workspace/slack-bot/scripts/doctor.sh          # env vars, tokens, webhook TLS, access config, process, lock, task state
 /workspace/slack-bot/scripts/doctor.sh --ping-webhook   # also sends one test POST (wakes the agent once)
 /workspace/slack-bot/scripts/ensure-running.sh --dry-run  # what self-healing would do, without doing it
 ```
@@ -34,7 +54,22 @@ Files:
 | `logs/bridge.log` | bridge log (rotated to `bridge.log.1` above 5 MB at start); metadata only, no message text by default |
 | `logs/ensure-running.log` | one line per `ensure-running.sh` run (`action=none/started/restarted/blocked/failed`) |
 | `run/bridge.pid` | PID of the running bridge |
-| `run/heartbeat.json` | `heartbeat_at`, `connected`, `last_connected_at`, event counters |
+| `run/bridge.lock` | held (flock) by the running bridge; a second bridge for the same install refuses to start |
+| `run/heartbeat.json` | `heartbeat_at`, `connected`, `last_connected_at`, event counters, operations by state |
+| `run/bridge.sqlite` | receipts, operation state transitions, thread task state (pruned after `retention_days`) |
+
+**Process health and task state are separate.** `status.sh` exits 0 when
+the process runs, even if some operations need a decision; those are listed
+under "tasks" and flagged by `doctor.sh` as warnings, never fixed by a
+restart.
+
+### Reports in Slack
+
+Set `report_channel` (and optionally `report_thread_ts`) and invite the bot
+there to get, rate limited per kind (`report_min_interval_seconds`):
+bridge (re)starts with a recovery summary, `report_webhook_failures`
+consecutive delivery problems, and Slack disconnects longer than
+`report_disconnect_seconds` (plus the reconnect). Empty = log only.
 
 ## Restart
 
@@ -48,7 +83,8 @@ Files:
 `SLACK_APP_TOKEN`, `GROK_WEBHOOK_URL`, `GROK_WEBHOOK_AUTH`) in the
 environment of the shell that runs them; they refuse to start and list what
 is missing otherwise. The bridge keeps the values it started with until it
-is restarted.
+is restarted, and removes them from its own environment after reading them
+(processes it might spawn never inherit them).
 
 On a **Grok Bot box**, secrets saved for the agent are injected into new
 processes automatically, so any agent shell (or a routine run) can simply

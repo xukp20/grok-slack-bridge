@@ -361,6 +361,8 @@ class Bridge:
                     return ""  # just a normal message from a non-owner
                 if cmd in ("resume", "help", "status") and entry is None:
                     return ""
+                if cmd == "resume" and thread.get("state") not in ("stopped", "paused"):
+                    return ""  # "继续"/"resume" in a live thread is a normal message
                 return cmd
         return ""
 

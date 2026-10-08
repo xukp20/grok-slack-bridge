@@ -215,6 +215,22 @@ class StopAndRestartTests(unittest.TestCase):
         self.assertEqual(t["state"], "no_reply")
 
 
+class ResumeTests(unittest.TestCase):
+    def test_resume_word_only_a_command_in_stopped_or_paused_threads(self):
+        b = make_bridge()
+        root = env(f"<@{BOT_USER}> start", channel="C0CHAN", etype="app_mention", ts="1700006000.000100")
+        b._handle_envelope(root)
+        cont = env(f"<@{BOT_USER}> 继续", channel="C0CHAN", thread_ts="1700006000.000100",
+                   channel_type="channel")
+        self.assertEqual(b._handle_envelope(cont), "queued")  # live thread: normal message
+        stop = env("stop", channel="C0CHAN", thread_ts="1700006000.000100", channel_type="channel")
+        self.assertEqual(b._handle_envelope(stop), "command:stop")
+        again = env(f"<@{BOT_USER}> 继续", channel="C0CHAN", thread_ts="1700006000.000100",
+                    channel_type="channel")
+        self.assertEqual(b._handle_envelope(again), "command:resume")
+        self.assertEqual(b.store.find_thread("C0CHAN", "1700006000.000100")["state"], "active")
+
+
 class ButtonStopTests(unittest.TestCase):
     def test_stop_button_is_access_checked(self):
         # Stage 3 leaves buttons as "unsupported" unless a handler is registered;

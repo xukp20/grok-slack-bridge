@@ -25,3 +25,11 @@ Before pushing, confirm no secrets are tracked:
 ```bash
 git ls-files | xargs grep -nE 'xox[abpr]-[0-9A-Za-z-]{10,}|xapp-[0-9]-[A-Z0-9]{8,}|Bearer [A-Za-z0-9._-]{16,}' || echo clean
 ```
+
+## CI workflow
+
+The GitHub Actions test workflow is kept at `ci/github-actions-tests.yml`
+because the CLI token used for the first push lacked the `workflow` scope.
+To enable CI, run `gh auth refresh -s workflow`, then
+`mkdir -p .github/workflows && git mv ci/github-actions-tests.yml .github/workflows/tests.yml`
+and push.

@@ -296,40 +296,143 @@ def set_session(client, home: Path, channel: str, thread_ts: str | None, status:
     return resp
 
 
+def open_store_quiet(home: Path):
+    try:
+        import store as storemod
+        return storemod.open_store(home)
+    except Exception as exc:  # the reply must still work without state
+        print(f"slackctl: note: state database unavailable ({type(exc).__name__})", file=sys.stderr)
+        return None
+
+
+def finish_op(st, op_id: str, state: str, reason: str) -> str:
+    """Move an operation to completed/no_reply when it is still open."""
+    if st is None or not op_id:
+        return "untracked"
+    row = st.get(op_id)
+    if row is None:
+        print(f"slackctl: note: unknown operation {op_id}", file=sys.stderr)
+        return "unknown"
+    if row["state"] in ("accepted", "needs-reconciliation", "unknown-result"):
+        st.transition(op_id, state, reason)
+        return state
+    return row["state"]
+
+
+def clear_ack(client, cfg: dict, channel: str, ack_ts: str | None, ack_reaction: str | None,
+              done_reaction: str | None) -> None:
+    if not ack_ts:
+        return
+    name = ack_reaction or cfg.get("ack_reaction") or "eyes"
+    try:
+        client.reactions_remove(channel=channel, timestamp=ack_ts, name=name)
+    except Exception as exc:
+        if slack_error(exc) not in ("no_reaction",):
+            print(f"slackctl: note: could not remove :{name}: ({slack_error(exc)})", file=sys.stderr)
+    if done_reaction:
+        try:
+            client.reactions_add(channel=channel, timestamp=ack_ts, name=done_reaction.strip(":"))
+        except Exception:
+            pass
+
+
 def cmd_reply(args) -> int:
+    home = common.resolve_home(args.home)
+    cfg = common.load_config(home)
+    st = open_store_quiet(home) if args.op else None
+    if args.no_reply:
+        client = web_client()
+        state = finish_op(st, args.op, "no_reply", args.reason or "agent chose not to reply")
+        session = set_session(client, home, args.channel, args.thread_ts, args.session_status or "active") \
+            if (args.session_status or args.thread_ts) else None
+        clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, None)
+        out = {"ok": True, "sent": False, "operation": args.op, "operation_state": state}
+        if session is not None:
+            out["session_status"] = "active" if session.get("ok") else f"error: {session.get('error')}"
+        print(json.dumps(out))
+        return 0
     text = read_text(args).strip()
     if not text:
-        die("refusing to send an empty message")
+        die("refusing to send an empty message (use --no-reply to record that you chose not to answer)")
     client = web_client()
     try:
         sent = post_reply(client, args.channel, text, args.thread_ts, args.format)
     except Exception as exc:
         if args.session_status and args.session_status != "none":
-            set_session(client, common.resolve_home(args.home), args.channel,
-                        args.thread_ts, "active")
+            set_session(client, home, args.channel, args.thread_ts, "active")
         die(f"chat.postMessage failed: {slack_error(exc)}", 1)
-    session = set_session(client, common.resolve_home(args.home), args.channel,
-                          args.thread_ts, args.session_status or "none")
-    if args.ack_ts:
-        cfg = common.load_config(common.resolve_home(args.home))
-        name = args.ack_reaction or cfg.get("ack_reaction") or "eyes"
-        try:
-            client.reactions_remove(channel=args.channel, timestamp=args.ack_ts, name=name)
-        except Exception as exc:
-            if slack_error(exc) not in ("no_reaction",):
-                print(f"slackctl: note: could not remove :{name}: ({slack_error(exc)})",
-                      file=sys.stderr)
-        if args.done_reaction:
-            try:
-                client.reactions_add(channel=args.channel, timestamp=args.ack_ts,
-                                     name=args.done_reaction.strip(":"))
-            except Exception:
-                pass
-    out = {"ok": True, "channel": args.channel, "thread_ts": args.thread_ts, "ts": sent}
+    session = set_session(client, home, args.channel, args.thread_ts, args.session_status or "none")
+    state = "untracked"
+    if args.op:
+        state = "accepted (interim)" if args.session_status == "processing" else \
+            finish_op(st, args.op, "completed", f"replied ts={sent[-1] if sent else ''}")
+    clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, args.done_reaction)
+    out = {"ok": True, "channel": args.channel, "thread_ts": args.thread_ts, "ts": sent,
+           "operation": args.op, "operation_state": state}
     if session is not None:
         out["session_status"] = session.get("agent_status") or session.get("status") \
             if session.get("ok") else f"error: {session.get('error')}"
     print(json.dumps(out))
+    return 0
+
+
+def _fmt_time(t) -> str:
+    return time.strftime("%m-%d %H:%M:%S", time.localtime(float(t))) if t else "-"
+
+
+def cmd_ops(args) -> int:
+    home = common.resolve_home(args.home)
+    import store as storemod
+    st = storemod.open_store(home)
+    if args.action == "list":
+        states = args.state or None
+        rows = st.list_ops(states, args.limit)
+        if args.json:
+            print(json.dumps([{k: r[k] for k in ("op_id", "state", "reason", "kind", "channel", "ts",
+                                                   "actor", "actor_type", "attempts", "updated_at")}
+                              for r in rows], indent=2, ensure_ascii=False))
+            return 0
+        print(json.dumps(st.counts()))
+        for r in rows:
+            print(f"{_fmt_time(r['updated_at'])}  {r['state']:<20} {r['op_id']:<34} {r['actor_type'] or '':<5} "
+                  f"{r['channel']}:{r['ts']}  {r['reason'][:70]}")
+        return 0
+    if not args.op:
+        die(f"ops {args.action} needs an operation id")
+    row = st.get(args.op)
+    if row is None:
+        die(f"unknown operation {args.op}", 1)
+    if args.action == "show":
+        row = {k: v for k, v in row.items() if k not in ("payload", "envelope")}
+        row["history"] = st.history(args.op)
+        print(json.dumps(row, indent=2, ensure_ascii=False))
+        return 0
+    try:
+        if args.action == "resolve":
+            st.transition(args.op, args.to, args.reason or "resolved by operator")
+        elif args.action == "retry":
+            if row["state"] in ("unknown-result", "needs-reconciliation") and not args.force:
+                die(f"{args.op} is {row['state']}: the agent may already have received it. "
+                    "Check the thread first; pass --force to send it again anyway.", 1)
+            st.transition(args.op, "queued", args.reason or "operator retry", not_before=0)
+    except Exception as exc:
+        die(str(exc), 1)
+    print(json.dumps({"ok": True, "op": args.op, "state": st.get(args.op)["state"]}))
+    return 0
+
+
+def cmd_threads(args) -> int:
+    home = common.resolve_home(args.home)
+    import store as storemod
+    st = storemod.open_store(home)
+    rows = st.list_threads(args.limit)
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    for t in rows:
+        print(f"{_fmt_time(t['updated_at'])}  {t['state']:<9} task={t['task_id']} bot_turns={t['bot_turns']} "
+              f"follow={t['following']} cursor={t['cursor_ts'] or '-'} catchup_ok={t['catchup_ok']}  "
+              f"{t['channel']}/{t['root_ts']}  {t['state_reason'][:50]}")
     return 0
 
 
@@ -616,6 +719,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ack-reaction", help="reaction name to remove (default: config ack_reaction)")
     r.add_argument("--done-reaction", help="optional reaction to add to --ack-ts after replying")
     r.add_argument("--format", choices=("markdown", "mrkdwn", "plain"), default="markdown")
+    r.add_argument("--op", help="operation_id from the payload; marks it completed after posting")
+    r.add_argument("--no-reply", action="store_true",
+                   help="send nothing; record that the agent saw the message and chose not to reply")
+    r.add_argument("--reason", help="note stored with --no-reply")
     r.add_argument("--session-status", choices=SESSION_STATUSES + ("none",),
                    help="after posting, set the thread's agent session status: active (done, "
                         "the default in payload commands), processing (an interim 'working on "
@@ -646,6 +753,23 @@ def build_parser() -> argparse.ArgumentParser:
     se.set_defaults(func=cmd_session)
 
     sub.add_parser("whoami", help="auth.test for the bot token").set_defaults(func=cmd_whoami)
+
+    op = sub.add_parser("ops", help="inspect and resolve delivery operations (state database)")
+    op.add_argument("action", choices=("list", "show", "resolve", "retry"))
+    op.add_argument("op", nargs="?")
+    op.add_argument("--state", action="append", help="filter list by state (repeatable)")
+    op.add_argument("--to", choices=("completed", "no_reply", "stopped", "ignored"), default="ignored",
+                    help="target state for resolve")
+    op.add_argument("--reason")
+    op.add_argument("--force", action="store_true", help="retry even an unknown-result operation")
+    op.add_argument("--limit", type=int, default=30)
+    op.add_argument("--json", action="store_true")
+    op.set_defaults(func=cmd_ops)
+
+    th = sub.add_parser("threads", help="list tracked threads (task state, bot turns, cursor)")
+    th.add_argument("--limit", type=int, default=30)
+    th.add_argument("--json", action="store_true")
+    th.set_defaults(func=cmd_threads)
 
     c = sub.add_parser("config", help="show/set non-secret config.json values")
     c.add_argument("action", choices=("show", "set", "unset", "path"))

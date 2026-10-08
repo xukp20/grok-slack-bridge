@@ -110,6 +110,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "agent_sessions": True,
     "session_title_chars": 60,
     "stop_message": "Stopped.",
+    # Reliability (state database run/bridge.sqlite)
+    "app_id": "",
+    "catchup_enabled": True,
+    "catchup_window_hours": 24,
+    "retention_days": 30,
 }
 
 ACCESS_MODES = ("everyone", "owner_only")
@@ -186,36 +191,6 @@ def coerce_config_value(key: str, raw: str) -> Any:
 # Agent (agent_view) events the bridge handles itself instead of forwarding.
 AGENT_EVENTS = {"app_home_opened", "app_context_changed", "agent_session_stopped", "agent_session_title_changed"}
 
-# Message subtypes that still represent a human writing to the bot.
-ALLOWED_SUBTYPES = {None, "", "file_share", "thread_broadcast"}
-
-
-def should_handle(event: dict[str, Any], bot_user_id: str = "",
-                  bot_id: str = "") -> tuple[bool, str]:
-    """Decide whether an Events API event should be forwarded."""
-    etype = event.get("type")
-    if etype not in ("app_mention", "message"):
-        return False, f"unsupported event type {etype}"
-    if etype == "message" and event.get("channel_type") not in ("im", None):
-        # Plain channel messages are only forwarded via app_mention.
-        return False, f"message in {event.get('channel_type')} (needs a mention)"
-    subtype = event.get("subtype")
-    if subtype not in ALLOWED_SUBTYPES:
-        return False, f"subtype {subtype}"
-    if event.get("bot_id") or event.get("bot_profile"):
-        return False, "message from a bot"
-    user = event.get("user")
-    if not user:
-        return False, "no user"
-    if bot_user_id and user == bot_user_id:
-        return False, "own message"
-    if bot_id and event.get("bot_id") == bot_id:
-        return False, "own bot_id"
-    if event.get("hidden"):
-        return False, "hidden"
-    return True, "ok"
-
-
 class Deduper:
     """Small LRU of seen keys (event_id and channel:ts)."""
 
@@ -275,15 +250,48 @@ def context_channels(event: dict[str, Any]) -> list[str]:
             if isinstance(e, dict) and e.get("type") == "slack#/types/channel_id" and e.get("value")]
 
 
+def slack_error_code(exc: Exception) -> str:
+    """Short, non-sensitive description of a Slack/HTTP exception."""
+    data = getattr(getattr(exc, "response", None), "data", None)
+    if isinstance(data, dict) and data.get("error"):
+        return str(data.get("error"))
+    return type(exc).__name__
+
+
+def mark_stopped(home: Path, channel: str, thread_ts: str, clear: bool = False) -> None:
+    """Remember (or forget) Stop-pressed agent sessions (run/stopped_sessions.json)."""
+    import time as _time
+    path = Path(home) / "run" / "stopped_sessions.json"
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        data = {}
+    key = f"{channel}:{thread_ts}"
+    if clear:
+        if key not in data:
+            return
+        data.pop(key)
+    else:
+        data[key] = int(_time.time())
+    cutoff = _time.time() - 86400
+    data = {k: v for k, v in data.items() if v >= cutoff}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def shell_quote(value: str) -> str:
     return shlex.quote(str(value))
 
 
-def build_payload(envelope: dict[str, Any], cfg: dict[str, Any], home: Path,
+def build_payload(msg, cfg: dict[str, Any], home: Path, *, entry: str,
+                  thread: dict[str, Any] | None = None,
                   user_info: dict[str, Any] | None = None,
                   session: dict[str, Any] | None = None,
-                  viewing: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Webhook payload for one message.
+                  viewing: dict[str, Any] | None = None,
+                  permissions: list[str] | None = None) -> dict[str, Any]:
+    """Webhook payload (version 2) for one accepted message (events.Msg).
 
     session: {"channel", "thread_ts", "status"} when the bridge opened/updated an
     agent session for this message (replies then go in that thread and the
@@ -291,50 +299,62 @@ def build_payload(envelope: dict[str, Any], cfg: dict[str, Any], home: Path,
     viewing: {"channel_ids": [...], "updated_at": int} last app_context_changed
     for this user (what they were looking at in Slack), if known.
     """
-    event = envelope.get("event") or {}
+    event = msg.raw or {}
     bot_user_id = cfg.get("bot_user_id", "")
     if session:
-        target = {"channel": session.get("channel") or event.get("channel"),
+        target = {"channel": session.get("channel") or msg.channel,
                   "thread_ts": session.get("thread_ts")}
     else:
         target = reply_target(event, bool(cfg.get("dm_reply_in_thread")))
-    user = event.get("user", "")
     owner = cfg.get("owner_user_id") or ""
-    is_dm = event.get("channel_type") == "im"
-    reply_cmd = [str(home / "scripts" / "reply.sh"), "--channel", target["channel"] or ""]
+    base = [str(home / "scripts" / "reply.sh"), "--op", msg.op_id, "--channel", target["channel"] or ""]
     if target["thread_ts"]:
-        reply_cmd += ["--thread-ts", target["thread_ts"]]
+        base += ["--thread-ts", target["thread_ts"]]
+    reply_cmd = list(base)
     if cfg.get("react_on_receipt") and cfg.get("ack_reaction") and not session:
-        reply_cmd += ["--ack-ts", event.get("ts", "")]
+        reply_cmd += ["--ack-ts", msg.ts]
     if session:
         reply_cmd += ["--session-status", "active"]
+    no_reply_cmd = base + ["--no-reply"]
+    if cfg.get("react_on_receipt") and cfg.get("ack_reaction") and not session:
+        no_reply_cmd += ["--ack-ts", msg.ts]
+    is_owner = bool(owner) and msg.user == owner and msg.actor_type == "human"
     payload: dict[str, Any] = {
         "source": "slack-bridge",
-        "version": 1,
+        "version": 2,
+        "type": "message",
         "bot_name": cfg.get("bot_name"),
         "bot_user_id": bot_user_id,
-        "team_id": envelope.get("team_id") or event.get("team"),
+        "team_id": msg.team_id,
         "workspace": cfg.get("workspace"),
-        "event_id": envelope.get("event_id"),
-        "event_time": envelope.get("event_time"),
-        "event_type": event.get("type"),
-        "conversation": "dm" if is_dm else (event.get("channel_type") or "channel"),
-        "channel": event.get("channel"),
-        "user": user,
+        "operation_id": msg.op_id,
+        "event_id": msg.op_id,
+        "event_type": msg.event_type,
+        "entry": entry,
+        "catchup": bool(msg.catchup),
+        "conversation": "dm" if msg.is_dm else (msg.channel_type or "channel"),
+        "channel": msg.channel,
+        "user": msg.user,
         "user_name": (user_info or {}).get("name", ""),
         "user_real_name": (user_info or {}).get("real_name", ""),
-        "is_owner": bool(owner) and user == owner,
+        "actor_type": msg.actor_type,
+        "bot": ({"user_id": msg.user, "bot_id": msg.bot_id, "app_id": msg.app_id}
+                if msg.actor_type == "bot" else None),
+        "is_owner": is_owner,
         "owner_configured": bool(owner),
-        "text": strip_mention(event.get("text", ""), bot_user_id),
-        "ts": event.get("ts"),
-        "thread_ts": event.get("thread_ts"),
-        "files": [
-            {k: f.get(k) for k in ("id", "name", "mimetype", "size", "permalink")}
-            for f in event.get("files") or []
-        ],
+        "permissions": permissions if permissions is not None else (
+            ["reply", "files", "approve", "admin"] if is_owner else ["reply"]),
+        "text": strip_mention(msg.text, bot_user_id),
+        "ts": msg.ts,
+        "thread_ts": msg.thread_ts or None,
+        "files": [{k: f.get(k) for k in ("id", "name", "mimetype", "size", "permalink")}
+                  for f in msg.files],
+        "thread": ({k: thread.get(k) for k in ("thread_key", "task_id", "state", "bot_turns")}
+                   if thread else None),
         "reply": {
             **target,
             "command": " ".join(shell_quote(p) for p in reply_cmd) + " <<'EOF'\n<your reply>\nEOF",
+            "no_reply_command": " ".join(shell_quote(p) for p in no_reply_cmd),
             "readme": str(home / "README.md"),
         },
         "agent_session": ({"channel": target["channel"], "thread_ts": target["thread_ts"],

@@ -18,5 +18,9 @@
   "webhook_retries": 3,
   "agent_sessions": true,
   "session_title_chars": 60,
-  "stop_message": "Stopped."
+  "stop_message": "Stopped.",
+  "app_id": "",
+  "catchup_enabled": true,
+  "catchup_window_hours": 24,
+  "retention_days": 30
 }

@@ -9,6 +9,7 @@ SCRIPTS = ROOT / "skills" / "slack-bridge" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import common  # noqa: E402
+import events  # noqa: E402
 import slackctl  # noqa: E402
 
 
@@ -63,25 +64,39 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(example, common.DEFAULT_CONFIG)
 
 
+IDENT = events.Identity(team_id="T1", app_id="A1", bot_user_id="UBOT", bot_id="BBOT")
+
+
+def msg_of(envelope):
+    envelope = {"event_id": "Ev1", "team_id": "T1", "api_app_id": "A1", **envelope}
+    m, _ = events.normalize(envelope, IDENT)
+    return m
+
+
 class FilterTests(unittest.TestCase):
-    BOT = "UBOT"
-
     def ok(self, event):
-        return common.should_handle(event, self.BOT, "BBOT")[0]
+        return events.normalize({"event_id": "E", "event": event}, IDENT)[0] is not None
 
-    def test_accepts_dm_and_mention(self):
-        self.assertTrue(self.ok({"type": "message", "channel_type": "im", "user": "U1", "text": "hi"}))
-        self.assertTrue(self.ok({"type": "app_mention", "user": "U1", "text": "<@UBOT> hi"}))
-        self.assertTrue(self.ok({"type": "message", "channel_type": "im", "user": "U1",
+    def test_accepts_messages_with_a_known_author(self):
+        self.assertTrue(self.ok({"type": "message", "channel": "D1", "ts": "1.1", "channel_type": "im",
+                                 "user": "U1", "text": "hi"}))
+        self.assertTrue(self.ok({"type": "app_mention", "channel": "C1", "ts": "1.1", "user": "U1",
+                                 "text": "<@UBOT> hi"}))
+        self.assertTrue(self.ok({"type": "message", "channel": "D1", "ts": "1.1", "user": "U1",
                                  "subtype": "file_share"}))
+        m = events.normalize({"event_id": "E", "event": {"type": "message", "channel": "C1", "ts": "1.1",
+                                                         "user": "U2", "bot_id": "B2", "app_id": "A2"}},
+                             IDENT)[0]
+        self.assertEqual((m.actor_type, m.bot_id, m.app_id), ("bot", "B2", "A2"))
 
     def test_rejects_noise(self):
-        self.assertFalse(self.ok({"type": "message", "channel_type": "im", "user": "UBOT"}))
-        self.assertFalse(self.ok({"type": "message", "channel_type": "im", "bot_id": "B1", "user": "U2"}))
-        self.assertFalse(self.ok({"type": "message", "channel_type": "im", "subtype": "message_changed"}))
-        self.assertFalse(self.ok({"type": "message", "channel_type": "channel", "user": "U1"}))
-        self.assertFalse(self.ok({"type": "message", "channel_type": "im", "user": "U1",
-                                  "subtype": "channel_join"}))
+        base = {"type": "message", "channel": "D1", "ts": "1.1", "channel_type": "im"}
+        self.assertFalse(self.ok({**base, "user": "UBOT"}))
+        self.assertFalse(self.ok({**base, "bot_id": "BBOT"}))
+        self.assertFalse(self.ok({**base, "user": "U9", "bot_id": "B9", "app_id": "A1"}))
+        self.assertFalse(self.ok({**base, "subtype": "message_changed"}))
+        self.assertFalse(self.ok({**base, "user": "U1", "subtype": "channel_join"}))
+        self.assertFalse(self.ok({**base}))
         self.assertFalse(self.ok({"type": "reaction_added", "user": "U1"}))
 
     def test_dedupe(self):
@@ -96,28 +111,39 @@ class FilterTests(unittest.TestCase):
 
 class PayloadTests(unittest.TestCase):
     def test_channel_mention_threads_and_owner(self):
-        env = {"event_id": "Ev1", "team_id": "T1", "event": {
-            "type": "app_mention", "user": "U1", "channel": "C1", "ts": "1.1",
-            "text": "<@UBOT>   summarize this"}}
+        m = msg_of({"event": {"type": "app_mention", "user": "U1", "channel": "C1", "ts": "1.1",
+                              "text": "<@UBOT>   summarize this"}})
         cfg = dict(common.DEFAULT_CONFIG, bot_user_id="UBOT", owner_user_id="U1")
-        p = common.build_payload(env, cfg, Path("/x/slack-bot"), {"name": "jx"})
+        p = common.build_payload(m, cfg, Path("/x/slack-bot"), entry="mention", user_info={"name": "jx"})
         self.assertEqual(p["text"], "summarize this")
         self.assertTrue(p["is_owner"])
+        self.assertEqual(p["entry"], "mention")
         self.assertEqual(p["reply"]["thread_ts"], "1.1")
-        self.assertIn("/x/slack-bot/scripts/reply.sh --channel C1 --thread-ts 1.1 --ack-ts 1.1 <<'EOF'",
+        self.assertIn("/x/slack-bot/scripts/reply.sh --op Ev1 --channel C1 --thread-ts 1.1 --ack-ts 1.1 <<'EOF'",
                       p["reply"]["command"])
         self.assertEqual(p["user_name"], "jx")
+        self.assertIn("files", p["permissions"])
 
     def test_dm_top_level_unless_threaded(self):
         ev = {"type": "message", "channel_type": "im", "user": "U2", "channel": "D1", "ts": "2.2"}
         cfg = dict(common.DEFAULT_CONFIG, owner_user_id="U1", react_on_receipt=False)
-        p = common.build_payload({"event": ev}, cfg, Path("/h"))
+        p = common.build_payload(msg_of({"event": ev}), cfg, Path("/h"), entry="dm")
         self.assertIsNone(p["reply"]["thread_ts"])
         self.assertFalse(p["is_owner"])
+        self.assertEqual(p["permissions"], ["reply"])
         self.assertEqual(p["conversation"], "dm")
         self.assertNotIn("--ack-ts", p["reply"]["command"])
         ev["thread_ts"] = "1.0"
-        self.assertEqual(common.build_payload({"event": ev}, cfg, Path("/h"))["reply"]["thread_ts"], "1.0")
+        self.assertEqual(common.build_payload(msg_of({"event": ev}), cfg, Path("/h"),
+                                              entry="dm")["reply"]["thread_ts"], "1.0")
+
+    def test_bot_author_is_never_owner(self):
+        ev = {"type": "message", "user": "U1", "bot_id": "B5", "app_id": "A5", "channel": "C1",
+              "ts": "3.3", "text": "<@UBOT> hi"}
+        cfg = dict(common.DEFAULT_CONFIG, owner_user_id="U1")
+        p = common.build_payload(msg_of({"event": ev}), cfg, Path("/h"), entry="mention")
+        self.assertFalse(p["is_owner"])
+        self.assertEqual(p["bot"], {"user_id": "U1", "bot_id": "B5", "app_id": "A5"})
 
 
 class TextTests(unittest.TestCase):
@@ -167,7 +193,7 @@ class AgentSessionTests(unittest.TestCase):
     def test_payload_with_session_threads_dm_and_ends_session(self):
         env = self.envelope()
         sess = {"channel": "D1", "thread_ts": "100.1", "status": "processing"}
-        p = common.build_payload(env, self.CFG, Path("/h"), session=sess,
+        p = common.build_payload(msg_of(env), self.CFG, Path("/h"), entry="dm", session=sess,
                                  viewing={"channel_ids": ["C9"], "updated_at": 1})
         self.assertEqual(p["reply"]["thread_ts"], "100.1")
         self.assertIn("--session-status active", p["reply"]["command"])
@@ -176,7 +202,7 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(p["viewing_context"]["channel_ids"], ["C9"])
 
     def test_payload_without_session_unchanged(self):
-        p = common.build_payload(self.envelope(), self.CFG, Path("/h"))
+        p = common.build_payload(msg_of(self.envelope()), self.CFG, Path("/h"), entry="dm")
         self.assertIsNone(p["reply"]["thread_ts"])
         self.assertIsNone(p["agent_session"])
         self.assertIn("--ack-ts", p["reply"]["command"])
@@ -184,7 +210,7 @@ class AgentSessionTests(unittest.TestCase):
 
     def test_agent_events_are_not_forwardable_messages(self):
         for t in common.AGENT_EVENTS:
-            self.assertFalse(common.should_handle({"type": t, "user": "U1"})[0])
+            self.assertIsNone(events.normalize({"event": {"type": t, "user": "U1"}}, IDENT)[0])
 
 
 class ManifestTests(unittest.TestCase):

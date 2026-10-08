@@ -27,6 +27,19 @@ The bridge treats 400/408/409/425/429 and 5xx other than 504 as "busy": the oper
 `queued`, is retried slowly in thread order, and the user sees "排队中…"
 instead of an error (see the troubleshooting table below).
 
+**Who handles a message** is decided by `session_routing`
+([session model](session-model.md)): DMs and channels without their own
+agent are handed by the routine run to the owner's **main** Grok Bot
+conversation (one shared, ordered context; it answers with `reply.sh --op`),
+so the run itself is short; a channel can be routed to a dedicated agent's
+webhook. What the handling conversation does with a message that arrives
+while it works is `busy_policy` (`interrupt_merge` default, or `queue`).
+`slackctl.sh routing` shows the effective route per channel; `doctor.sh`
+checks dedicated routes (env present, TLS; no request sent); the heartbeat
+lists them under `dedicated_routes`. Adding a dedicated route's env
+variables needs `restart.sh`; if they are missing the channel falls back to
+the default webhook (log warning, `routing.fallback` in the payload).
+
 **Restarts never replay work.** Operations that were `submitted` or
 `accepted` when the bridge stopped become `needs-reconciliation`; a webhook
 timeout is `unknown-result`. Neither is resent automatically, because the
@@ -107,6 +120,7 @@ the shell first; never put them in a file in the install directory.
 | Only some messages get 👀 / answers; counters lower than expected | **Two bridges** connected with the same app token (old machine, old account, a second install). Slack splits events across connections. | Stop the other one (`stop.sh` there); check with `pgrep -af bridge.py` on every machine you used |
 | 👀 then ⚠️ and the fixed error text; log `webhook rejected … HTTP 401/403` (Authorization) or `404/410` (URL) | Routine webhook URL or key rotated, routine deleted, or agent switched | Copy the new URL and Authorization from the routine, update `GROK_WEBHOOK_*`, `reconfigure.sh --ping-webhook` |
 | Log `webhook busy for … (HTTP 400/409/429/5xx except 504); retry n in Ns`; agent view shows "排队中…" (or ⏳ on the message) | **Overlapping runs.** Each Slack message starts its own routine run; while the previous run is still working, the routine can reject the new one (seen as HTTP 400). A `doctor.sh --ping-webhook` right after usually returns 200. | Nothing: the message stays queued and is retried after 20s, 40s, 80s, 160s, then every 5 min, for up to 15 min (`webhook_busy_*`), behind earlier messages of the same thread/DM. `stop`/`停` cancels it. Only if it still fails does the user get "请稍后重新发送" and the operation becomes `failed` |
+| Log `route for C…: GROK_WEBHOOK_URL_X/… not set …; using the default webhook` | A dedicated route's env variables were not exported when the bridge started | Export them in the shell, `restart.sh` (only when `ops list` shows nothing in flight), check `slackctl.sh routing --channel C…` |
 | Log `webhook stayed busy for … giving up` | The routine was busy (or erroring) for the whole retry window | Ask whether the previous task is stuck; check the routine's runs; the user resends. Raise `webhook_busy_max_seconds` for long tasks |
 | ⚠️ with `giving up on … after 3 attempts (not delivered: …)` | Webhook host unreachable (connect/TLS failure, request never sent) | `doctor.sh` (TLS check); retry later |
 | `delivery of … has an unknown result (timed out … / HTTP 504 …)`; op `unknown-result` | No answer after the request was sent, or a gateway timeout (504) after forwarding it: the agent may be running it | Never resent automatically. `ops show`, then `ops resolve --to completed` if the agent answered, or `ops retry --force` if it clearly did not; raise `webhook_timeout_seconds` |

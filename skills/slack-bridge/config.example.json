@@ -46,6 +46,11 @@
   "new_task_message": "OK, new task. Bot turn counter reset.",
   "resume_message": "Resumed.",
   "deny_message": "Sorry, I only take requests from my owner here.",
+  "session_routing": {
+    "default": "main",
+    "channels": {}
+  },
+  "busy_policy": "interrupt_merge",
   "mention_allowlist": [],
   "outbox_max_items": 50,
   "outbox_min_interval_seconds": 1.0,

@@ -741,6 +741,19 @@ def cmd_access(args) -> int:
     return 0 if v.allowed else 3
 
 
+def cmd_routing(args) -> int:
+    """Show the effective session route per channel (env var names only)."""
+    cfg = common.load_config(common.resolve_home(args.home))
+    env = {n: common.env_value(n) for n in common.route_env_names(cfg)}
+    channels = [args.channel] if args.channel else \
+        list(((cfg.get("session_routing") or {}).get("channels") or {}).keys())
+    out = {"default": common.route_for(cfg, "", env),
+           "channels": {ch: common.route_for(cfg, ch, env) for ch in channels},
+           "problems": common.validate_routing(cfg)}
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_migrate_config(args) -> int:
     home = common.resolve_home(args.home)
     path = common.config_path(home)
@@ -906,6 +919,21 @@ def cmd_doctor(args) -> int:
             f"overrides={len(cfg.get('channel_overrides') or {})}")
     except Exception as exc:
         add(False, "access policy", str(exc))
+    rproblems = common.validate_routing(cfg)
+    routes = (cfg.get("session_routing") or {}).get("channels") or {}
+    add(None if rproblems else True, "session routing",
+        "; ".join(rproblems) if rproblems else
+        f"default=main busy_policy={cfg.get('busy_policy', 'interrupt_merge')} channel routes={len(routes)}")
+    for ch, entry in routes.items():
+        if not isinstance(entry, dict) or entry.get("target") != "dedicated":
+            continue
+        env = {n: common.env_value(n) for n in common.route_env_names({"session_routing": {"channels": {ch: entry}}})}
+        r = common.route_for(cfg, ch, env)
+        if r.get("webhook") == "dedicated":
+            ok, detail = check_webhook_tls(env[r["webhook_url_env"]])
+            add(ok, f"route {ch}", f"dedicated via {r['webhook_url_env']}: {detail} (no request sent)")
+        else:
+            add(None, f"route {ch}", f"dedicated route unusable, falls back to main: {r.get('fallback')}")
 
     # env
     for name in common.REQUIRED_ENV:
@@ -1063,7 +1091,11 @@ def build_parser() -> argparse.ArgumentParser:
     ac.add_argument("--api-app-id", help="envelope app id (default: our app)")
     ac.set_defaults(func=cmd_access)
 
-    mc = sub.add_parser("migrate-config", help="convert legacy keys to the explicit access policy")
+    rt = sub.add_parser("routing", help="show which agent conversation handles each channel")
+    rt.add_argument("--channel")
+    rt.set_defaults(func=cmd_routing)
+
+    mc = sub.add_parser("migrate-config", help="add missing access/routing keys (legacy access -> explicit policy)")
     mc.add_argument("--dry-run", action="store_true")
     mc.set_defaults(func=cmd_migrate_config)
 

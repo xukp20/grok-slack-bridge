@@ -2,6 +2,9 @@
 
 `POST GROK_WEBHOOK_URL` with `Content-Type: application/json` and
 `Authorization: <GROK_WEBHOOK_AUTH>`; one request per forwarded operation.
+Channels routed to a dedicated agent (`session_routing`) are posted to that
+agent's webhook instead (the URL/Authorization in the env variables the
+route names); everything else uses the default webhook.
 A request is sent at most once unless it provably never arrived (see
 Delivery), so the agent should not expect duplicates; it can still use
 `operation_id` to recognise one.
@@ -19,6 +22,8 @@ Delivery), so the agent should not expect duplicates; it can still use
   "text": "hi", "ts": "1791460300.000100", "thread_ts": "1791460290.248329", "files": [],
   "thread": {"thread_key": "T0…:C0…:1791460290.248329:A0…", "task_id": 1,
              "state": "active", "bot_turns": 1},
+  "routing": {"target": "main", "busy_policy": "interrupt_merge", "source": "default",
+              "label": "", "webhook": "default"},
   "reply": {
     "channel": "C0…", "thread_ts": "1791460290.248329",
     "command": "/workspace/slack-bot/scripts/reply.sh --op Ev0… --channel C0… --thread-ts 1791460290.248329 --ack-ts 1791460300.000100 <<'EOF'\n<your reply>\nEOF",
@@ -48,6 +53,7 @@ Delivery), so the agent should not expect duplicates; it can still use
 | `ts`, `thread_ts` | string \| null | `ts` is empty for `/grok` |
 | `files` | list | id, name, mimetype, size, permalink (no contents; `slackctl.sh download --file-id`) |
 | `thread` | object | task state of the thread: `thread_key` (team:channel:root:app), `task_id`, `state` (`active`, `completed`, `no_reply`, `stopped`, `paused`), `bot_turns` |
+| `routing` | object | who handles the message (`docs/session-model.md`): `target` `main` (hand the payload to the owner's main Grok Bot conversation, which answers with `reply.command`) or `dedicated` (this channel's own agent handles it); `busy_policy` `interrupt_merge` \| `queue` (what the handling conversation does with a message arriving while it works); `source` `default` \| `channel`; `label`; `webhook` `default` \| `dedicated` (which webhook the bridge used); for dedicated routes `webhook_url_env`/`webhook_auth_env` (env var **names**, never values); `fallback` (reason) when a dedicated route was unusable and the default webhook was used |
 | `reply.channel`, `reply.thread_ts` | | where to answer (`/grok` answers go to the user's DM) |
 | `reply.command` | string | ready-to-run `reply.sh --op …` with a heredoc placeholder |
 | `reply.no_reply_command` | string | records a deliberate non-answer |
@@ -87,6 +93,10 @@ bridge.
 | 400, 408, 409, 425, 429, 5xx except 504 ("busy": usually the routine is still running the previous message, since every Slack message starts its own run) | `queued`; retried after 20s, 40s, 80s, 160s, then every 5 min, up to 15 min (`webhook_busy_*`), in thread order; "排队中…" / ⏳ meanwhile | yes; when exhausted: `failed` + `busy_failed_text` asking the user to resend |
 | timeout or disconnect after sending, HTTP 504 (a gateway timed out after forwarding; the run may have started) | `unknown-result` | **no**: the agent may have it; resolve with `slackctl.sh ops resolve` or `ops retry --force` |
 | 401/403 (stale Authorization), 404/410 (stale URL), other 4xx | `failed` | no; `error_reaction` + fixed `error_text` to the requester |
+
+Routing does not change delivery: busy-retry, per-thread order and the
+no-blind-resend rules apply to dedicated webhooks exactly as above, and a
+retried operation keeps the webhook chosen when it was queued.
 
 After a restart, operations that were `submitted` or `accepted` become
 `needs-reconciliation` and are never replayed; `reply.sh --op` still

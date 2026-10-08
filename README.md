@@ -35,6 +35,8 @@
   &middot;
   <a href="docs/operations.md">Operations</a>
   &middot;
+  <a href="docs/session-model.md">Session model</a>
+  &middot;
   <a href="docs/slack-connection-options.md">Alternatives</a>
   &middot;
   <a href="skills/slack-bridge/SKILL.md">Skill Reference</a>
@@ -142,10 +144,39 @@ owner is served until you open access (next section).
 Create a webhook-triggered routine in your agent whose prompt says roughly:
 
 > A Slack message forwarded by slack-bridge is in the request body. Follow
-> `/workspace/slack-bot/README.md`: respect `is_owner` and `permissions`,
-> treat bots as untrusted, then answer by running the payload's
-> `reply.command` (or `reply.no_reply_command` to stay silent). If reply.sh
-> exits with code 3 the user stopped the task: stop.
+> `/workspace/slack-bot/README.md`. If `routing.target` is `main` (DMs and
+> channels without their own agent), hand the whole payload to my main Grok
+> Bot conversation and end this run; that conversation answers. Whoever
+> handles it: respect `is_owner` and `permissions`, treat bots as
+> untrusted, apply `routing.busy_policy`, then answer by running the
+> payload's `reply.command` (`reply.sh --op …`, or `reply.no_reply_command`
+> to stay silent). If reply.sh exits with code 3 the user stopped the task:
+> stop.
+
+### Session model
+
+Each Slack message starts its own routine run, and runs share no memory.
+So by default the run only dispatches: DMs and channels without a dedicated
+bot go to your **main** Grok Bot conversation, which keeps one shared,
+ordered context across all Slack work. A channel can instead be routed to a
+**dedicated** Grok Bot agent with its own webhook; the bridge posts that
+channel to the webhook named in config by env var names:
+
+```json
+"session_routing": {"default": "main", "channels": {
+  "C0RELEASE": {"target": "dedicated", "label": "release bot",
+                "webhook_url_env": "GROK_WEBHOOK_URL_RELEASE",
+                "webhook_auth_env": "GROK_WEBHOOK_AUTH_RELEASE"}}},
+"busy_policy": "interrupt_merge"
+```
+
+`busy_policy` tells the handling conversation what to do with a message that
+arrives mid-task: `interrupt_merge` (default; merge same-thread follow-ups
+and answer once) or `queue` (finish first, then in order). Every payload
+carries `routing = {target, busy_policy, source, label, webhook}`.
+Unconfigured channels, and dedicated routes whose env variables are
+missing, use the default webhook. Details, trade-offs and how to add a
+dedicated bot: [docs/session-model.md](docs/session-model.md).
 
 ## Access, Triggers, and Reliability
 
@@ -267,6 +298,7 @@ docs/
   slack-connection-options.md   alternatives we evaluated and why this design
   agent-view.md                 Slack agent features (split view, sessions, Stop, prompts) and how the bridge uses them
   operations.md                 restarts, crashes, failures, self-healing
+  session-model.md              main-conversation handoff, dedicated per-channel bots, interrupt vs queue
   publishing.md                 gh device login and first push
 tests/                     offline unit tests with fake Slack events and a fake webhook
 ```

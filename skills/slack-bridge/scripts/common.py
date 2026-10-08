@@ -54,6 +54,103 @@ def describe_secret(name: str, environ: dict[str, str] | None = None) -> str:
     return f"set ({len(value)} chars)"
 
 
+# ---------------------------------------------------------------------------
+# Session routing
+# ---------------------------------------------------------------------------
+
+ROUTE_TARGETS = ("main", "dedicated")
+BUSY_POLICIES = ("interrupt_merge", "queue")
+ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,99}$")
+
+
+def _routing(cfg: dict[str, Any]) -> dict[str, Any]:
+    r = cfg.get("session_routing")
+    return r if isinstance(r, dict) else {}
+
+
+def route_env_names(cfg: dict[str, Any]) -> list[str]:
+    """Env var names used by dedicated channel routes (valid names only)."""
+    names = []
+    for entry in (_routing(cfg).get("channels") or {}).values():
+        if isinstance(entry, dict) and entry.get("target") == "dedicated":
+            for k in ("webhook_url_env", "webhook_auth_env"):
+                n = str(entry.get(k) or "")
+                if ENV_NAME_RE.match(n) and n not in names and n not in REQUIRED_ENV:
+                    names.append(n)
+    return names
+
+
+def route_for(cfg: dict[str, Any], channel: str, secrets: dict[str, str] | None = None) -> dict[str, Any]:
+    """Effective route for a channel.
+
+    Returns {"target", "busy_policy", "source", "label", "webhook", and for a
+    usable dedicated route "webhook_url_env"/"webhook_auth_env"}. A dedicated
+    route whose env vars are missing or invalid falls back to the default
+    (main) target and says why in "fallback".
+    """
+    routing = _routing(cfg)
+    policy = cfg.get("busy_policy") if cfg.get("busy_policy") in BUSY_POLICIES else "interrupt_merge"
+    default = routing.get("default") if routing.get("default") in ROUTE_TARGETS else "main"
+    if default == "dedicated":
+        default = "main"  # a default needs no webhook of its own: dedicated is per channel
+    out = {"target": default, "busy_policy": policy, "source": "default", "label": "", "webhook": "default"}
+    entry = (routing.get("channels") or {}).get(channel)
+    if not isinstance(entry, dict):
+        return out
+    out["source"] = "channel"
+    out["label"] = str(entry.get("label") or "")
+    if entry.get("busy_policy") in BUSY_POLICIES:
+        out["busy_policy"] = entry["busy_policy"]
+    target = entry.get("target") if entry.get("target") in ROUTE_TARGETS else default
+    if target != "dedicated":
+        out["target"] = target
+        return out
+    url_env, auth_env = str(entry.get("webhook_url_env") or ""), str(entry.get("webhook_auth_env") or "")
+    if not (ENV_NAME_RE.match(url_env) and ENV_NAME_RE.match(auth_env)):
+        out["fallback"] = "dedicated route needs valid webhook_url_env and webhook_auth_env names"
+        return out
+    if secrets is not None:
+        url = secrets.get(url_env, "")
+        if not url or not url.lower().startswith("https://") or not secrets.get(auth_env):
+            out["fallback"] = f"{url_env}/{auth_env} not set (or URL not https) in the environment"
+            return out
+    out.update(target="dedicated", webhook="dedicated", webhook_url_env=url_env, webhook_auth_env=auth_env)
+    return out
+
+
+def validate_routing(cfg: dict[str, Any]) -> list[str]:
+    problems = []
+    routing = cfg.get("session_routing")
+    if routing is not None and not isinstance(routing, dict):
+        return ["session_routing must be an object"]
+    routing = routing or {}
+    if routing.get("default", "main") != "main":
+        problems.append("session_routing.default must be 'main' (dedicated agents are configured per channel)")
+    if cfg.get("busy_policy", "interrupt_merge") not in BUSY_POLICIES:
+        problems.append(f"busy_policy must be one of {BUSY_POLICIES} (treated as interrupt_merge)")
+    channels = routing.get("channels") or {}
+    if not isinstance(channels, dict):
+        return problems + ["session_routing.channels must be an object keyed by channel ID"]
+    for ch, e in channels.items():
+        if not isinstance(e, dict):
+            problems.append(f"session_routing.channels[{ch}] must be an object")
+            continue
+        if e.get("target", "main") not in ROUTE_TARGETS:
+            problems.append(f"session_routing.channels[{ch}].target must be one of {ROUTE_TARGETS}")
+        if "busy_policy" in e and e["busy_policy"] not in BUSY_POLICIES:
+            problems.append(f"session_routing.channels[{ch}].busy_policy must be one of {BUSY_POLICIES}")
+        if e.get("target") == "dedicated":
+            for k in ("webhook_url_env", "webhook_auth_env"):
+                v = str(e.get(k) or "")
+                if not ENV_NAME_RE.match(v):
+                    problems.append(f"session_routing.channels[{ch}].{k} must be an env var NAME "
+                                    "(e.g. GROK_WEBHOOK_URL_DEV); values never go in config")
+                elif v in REQUIRED_ENV:
+                    problems.append(f"session_routing.channels[{ch}].{k} reuses {v}; a dedicated agent "
+                                    "needs its own variables")
+    return problems
+
+
 def take_secrets(names: Iterable[str] = REQUIRED_ENV) -> dict[str, str]:
     """Read the secrets and remove them from os.environ, so nothing the bridge
     spawns (or any library that shells out) inherits them."""
@@ -128,6 +225,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "new_task_message": "OK, new task. Bot turn counter reset.",
     "resume_message": "Resumed.",
     "deny_message": "Sorry, I only take requests from my owner here.",
+    # Session routing: which agent conversation handles a channel (passed to the
+    # routine as payload.routing). "main" = the owner's main Grok Bot
+    # conversation (shared, ordered context); "dedicated" = a channel-specific
+    # agent with its own webhook, named by env var NAMES (never values).
+    "session_routing": {
+        "default": "main",
+        "channels": {},                 # {"C…": {"target": "dedicated", "webhook_url_env": "…", "webhook_auth_env": "…"}}
+    },
+    "busy_policy": "interrupt_merge",   # interrupt_merge | queue (what the handling session does when busy)
     # Outgoing messages and monitoring (stage 4)
     "mention_allowlist": [],            # extra user IDs replies may ping (owner/requester always may)
     "outbox_max_items": 50,
@@ -219,7 +325,7 @@ def migrate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
             notes.append(f"access={legacy} -> human_access=owner_only"
                          + (" (set human_access=everyone explicitly to reopen)" if legacy == "everyone" else ""))
     for key in ("human_access", "user_allowlist", "user_denylist", "bot_access", "bot_allowlist",
-                "bot_denylist", "channel_allowlist", "channel_overrides"):
+                "bot_denylist", "channel_allowlist", "channel_overrides", "session_routing", "busy_policy"):
         if key not in out:
             out[key] = DEFAULT_CONFIG[key]
             notes.append(f"added {key}={json.dumps(DEFAULT_CONFIG[key])}")
@@ -231,11 +337,20 @@ SECRET_PATTERN = re.compile(r"xox[abpre]-|xapp-|bearer\s", re.IGNORECASE)
 
 def save_config(home: Path, cfg: dict[str, Any]) -> Path:
     """Atomically write config.json. Refuses anything that looks like a secret."""
-    for key, value in cfg.items():
-        if isinstance(value, str) and SECRET_PATTERN.search(value):
+    def walk(key: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for k, v in value.items():
+                walk(f"{key}.{k}", v)
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                walk(f"{key}[{i}]", v)
+        elif isinstance(value, str) and (SECRET_PATTERN.search(value) or (
+                key.endswith(("webhook_url_env", "webhook_auth_env")) and not ENV_NAME_RE.match(value))):
             raise ValueError(
                 f"refusing to store a token-like value in config key {key!r}; "
-                "secrets belong in environment variables only")
+                "secrets belong in environment variables only (config holds env var NAMES)")
+    for key, value in cfg.items():
+        walk(key, value)
     home.mkdir(parents=True, exist_ok=True)
     path = config_path(home)
     fd, tmp = tempfile.mkstemp(dir=str(home), prefix=".config.", suffix=".json")
@@ -261,6 +376,8 @@ def coerce_config_value(key: str, raw: str) -> Any:
         return float(raw)
     if key in ("access", "human_access") and raw not in ACCESS_MODES:
         raise ValueError(f"{key} must be one of {ACCESS_MODES}")
+    if key == "busy_policy" and raw not in BUSY_POLICIES:
+        raise ValueError(f"busy_policy must be one of {BUSY_POLICIES}")
     if key == "bot_access" and raw not in BOT_ACCESS_MODES:
         raise ValueError(f"bot_access must be one of {BOT_ACCESS_MODES}")
     if key in LIST_KEYS:
@@ -377,6 +494,7 @@ def shell_quote(value: str) -> str:
 
 
 def build_payload(msg, cfg: dict[str, Any], home: Path, *, entry: str,
+                  routing: dict[str, Any] | None = None,
                   thread: dict[str, Any] | None = None,
                   user_info: dict[str, Any] | None = None,
                   session: dict[str, Any] | None = None,
@@ -451,6 +569,9 @@ def build_payload(msg, cfg: dict[str, Any], home: Path, *, entry: str,
         "agent_session": ({"channel": target["channel"], "thread_ts": target["thread_ts"],
                            "status": session.get("status", "processing")} if session else None),
         "viewing_context": viewing or None,
+        "routing": {k: v for k, v in (routing or route_for(cfg, msg.channel)).items()
+                    if k in ("target", "busy_policy", "source", "label", "webhook", "fallback",
+                             "webhook_url_env", "webhook_auth_env")},
     }
     if cfg.get("forward_raw_event", True):
         payload["raw_event"] = event

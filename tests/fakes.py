@@ -92,9 +92,11 @@ class FakePoster:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
         self.payloads = []
+        self.calls = []  # (url, auth) per attempt
 
     def __call__(self, url, auth, payload, timeout):
         self.payloads.append(payload)
+        self.calls.append((url, auth))
         outcome = self.outcomes.pop(0) if self.outcomes else "accepted"
         if isinstance(outcome, int):  # an HTTP status: classify like the real poster
             return webhook.classify_status(outcome)

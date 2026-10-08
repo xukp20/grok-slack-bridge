@@ -56,6 +56,12 @@ show up there.
 - Old configs with `access`: run `slackctl.sh migrate-config` (backs up the
   file; `access: everyone` becomes `human_access: owner_only` — re-open
   explicitly if you really want everyone).
+- `session_routing.channels.*.webhook_url_env` / `webhook_auth_env` take
+  env var **names** (`GROK_WEBHOOK_URL_RELEASE`), never the URL or token;
+  they must differ from `GROK_WEBHOOK_URL`/`GROK_WEBHOOK_AUTH`. New
+  variables are read only at start: export them, then `restart.sh`. Until
+  then the channel silently uses the default (main) webhook — check
+  `slackctl.sh routing --channel C…` and `doctor.sh`.
 - `report_channel` is empty by default (log only). Set it, and the bot must
   be a member of that channel.
 

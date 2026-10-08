@@ -2,8 +2,8 @@
 
 `config.json` in the install directory holds **non-secret** settings only
 (`save_config` refuses token-like values). The bridge re-reads it for every
-event, so most edits apply live; `outbox_*` and the four secrets need
-`restart.sh`. Defaults: [`config.example.json`](../config.example.json).
+event, so most edits apply live; `outbox_*`, the four secrets and the env
+variables of a new dedicated route need `restart.sh`. Defaults: [`config.example.json`](../config.example.json).
 
 Edit with `scripts/slackctl.sh config set <key> <value>` (lists accept
 `U1,U2`; objects/lists of objects accept JSON) or by hand, then check with
@@ -150,6 +150,24 @@ and `slackctl.sh threads`.
 | `error_reaction`, `react_on_receipt`, `ack_reaction` | `warning`, `true`, `eyes` | reactions |
 | `slash_ack_text`, `slash_usage_text` | … | ephemeral answers to `/grok` |
 
+## Session routing
+
+Which agent conversation handles a channel; passed to the routine as
+`payload.routing`. Full model, trade-offs and how to add a dedicated bot:
+[`docs/session-model.md`](../../../docs/session-model.md).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `session_routing.default` | `"main"` | DMs and channels without an entry: the routine hands the payload to the owner's **main** Grok Bot conversation (shared, ordered context) via the default webhook. Must be `main` |
+| `session_routing.channels` | `{}` | `{"C…": {"target": "dedicated", "webhook_url_env": "NAME", "webhook_auth_env": "NAME", "label": "…", "busy_policy": "queue"}}`. `dedicated` posts that channel to its own agent's webhook; the two fields are env var **names** (values are secrets and are refused in config). `{"target": "main", "busy_policy": …}` only overrides the policy |
+| `busy_policy` | `"interrupt_merge"` | `interrupt_merge`: the handling conversation pauses, merges a same-thread follow-up into the unfinished work and answers once; `queue`: finish the current task, then take messages in order. Passed through; the bridge's busy-retry is unaffected |
+
+Unconfigured channels always use `GROK_WEBHOOK_URL`/`GROK_WEBHOOK_AUTH`. A
+dedicated route whose variables were not set when the bridge started falls
+back to the default webhook (warning in the log and `doctor.sh`,
+`routing.fallback` in the payload). Inspect with `slackctl.sh routing
+[--channel C…]`.
+
 ## Presentation and privacy
 
 | Key | Default | Meaning |
@@ -175,6 +193,20 @@ A small team, one noisy person blocked, a read-only announcements channel:
   "user_allowlist": ["U0ALICE", "U0BOB"],
   "user_denylist": ["U0SPAM"],
   "channel_overrides": {"C0ANNOUNCE": {"human_access": "owner_only"}}
+}
+```
+
+One channel with its own Grok Bot agent; everything else goes to the main
+conversation (export `GROK_WEBHOOK_URL_RELEASE` and
+`GROK_WEBHOOK_AUTH_RELEASE` before `restart.sh`):
+
+```json
+{
+  "session_routing": {"default": "main", "channels": {
+    "C0RELEASE": {"target": "dedicated", "label": "release bot",
+                  "webhook_url_env": "GROK_WEBHOOK_URL_RELEASE",
+                  "webhook_auth_env": "GROK_WEBHOOK_AUTH_RELEASE"}}},
+  "busy_policy": "interrupt_merge"
 }
 ```
 

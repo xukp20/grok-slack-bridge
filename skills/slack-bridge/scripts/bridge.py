@@ -84,7 +84,7 @@ class Bridge:
         # Secrets come from take_secrets() (removed from os.environ so child
         # processes never inherit them) or, in tests/dry runs, from the env.
         self.secrets = secrets if secrets is not None else {
-            n: common.env_value(n) for n in common.REQUIRED_ENV}
+            n: common.env_value(n) for n in (*common.REQUIRED_ENV, *common.route_env_names(self.cfg))}
         self.webhook_url = self.secrets.get(common.ENV_WEBHOOK_URL, "")
         self.webhook_auth = common.normalize_auth_header(self.secrets.get(common.ENV_WEBHOOK_AUTH, ""))
         self.outbox = outboxmod.Outbox(
@@ -174,7 +174,7 @@ class Bridge:
                 continue
             log.info("deciding receipt %s left in 'received' before the restart", row["op_id"])
             self.process(msg, row["thread_key"])
-        problems = access.validate(self.cfg)
+        problems = access.validate(self.cfg) + common.validate_routing(self.cfg)
         for problem in problems:
             log.warning("config: %s", problem)
         self.outbox.start()
@@ -206,6 +206,7 @@ class Bridge:
             "bot_user_id": self.ident.bot_user_id,
             "app_id": self.ident.app_id,
             "webhook_host": common.webhook_host(self.webhook_url),
+            "dedicated_routes": self.dedicated_hosts(),
             **self.stats,
             "operations": self.store.counts(),
         }
@@ -479,8 +480,9 @@ class Bridge:
         reaction = self.cfg.get("ack_reaction") if self.cfg.get("react_on_receipt") else ""
         if reaction and msg.ts and not session and not self.dry_run and self.web is not None:
             self._safe(self.web.reactions_add, channel=msg.channel, timestamp=msg.ts, name=reaction)
+        routing = self.route(msg.channel)
         payload = common.build_payload(
-            msg, self.cfg, self.public_home, entry=decision.entry, thread=thread,
+            msg, self.cfg, self.public_home, entry=decision.entry, routing=routing, thread=thread,
             user_info=self.user_info(msg.user), session=session,
             viewing=self.viewing.get(msg.user),
             permissions=decision.verdict.permissions if decision.verdict else None)
@@ -598,7 +600,8 @@ class Bridge:
             return hold[0]
         payload = json.loads(op["payload"] or "{}")
         self.store.transition(op["op_id"], "submitted", "posting to webhook", attempts_inc=1)
-        result = self.poster(self.webhook_url, self.webhook_auth, payload,
+        url, auth = self.webhook_for(payload.get("routing"))
+        result = self.poster(url, auth, payload,
                              float(self.cfg.get("webhook_timeout_seconds", 20)))
         attempts = op["attempts"] + 1
         if result.outcome == "accepted":
@@ -640,6 +643,35 @@ class Bridge:
             log.error("giving up on %s after %d attempts (%s)", op["op_id"], attempts, result.detail)
         self.on_delivery_result(op, "failed", result)
         return "failed"
+
+    # -- session routing -------------------------------------------------------
+    def route(self, channel: str) -> dict:
+        """Which agent conversation handles this channel (see docs/session-model.md)."""
+        r = common.route_for(self.cfg, channel, self.secrets)
+        if r.get("fallback"):
+            log.warning("route for %s: %s; using the default webhook (%s)", channel, r["fallback"], r["target"])
+        return r
+
+    def dedicated_hosts(self) -> dict[str, str]:
+        """{channel: webhook host} for usable dedicated routes (no secrets)."""
+        out = {}
+        for ch in ((self.cfg.get("session_routing") or {}).get("channels") or {}):
+            r = common.route_for(self.cfg, ch, self.secrets)
+            if r.get("webhook") == "dedicated":
+                out[ch] = common.webhook_host(self.secrets.get(r["webhook_url_env"], ""))
+        return out
+
+    def webhook_for(self, routing: dict | None) -> tuple[str, str]:
+        """URL + Authorization for a payload's route; default webhook unless a usable
+        dedicated route was chosen when the operation was queued."""
+        if routing and routing.get("webhook") == "dedicated":
+            url = self.secrets.get(routing.get("webhook_url_env") or "", "")
+            auth = self.secrets.get(routing.get("webhook_auth_env") or "", "")
+            if url and auth:
+                return url, common.normalize_auth_header(auth)
+            log.warning("dedicated webhook %s is no longer available; using the default webhook",
+                        routing.get("webhook_url_env"))
+        return self.webhook_url, self.webhook_auth
 
     def busy_delay(self, attempts: int) -> float:
         """Backoff after the n-th busy answer: webhook_busy_retry_delays, then the interval."""
@@ -1030,7 +1062,8 @@ def main(argv=None) -> int:
         print(f"slack-bridge: another bridge is already running for {home} "
               "(run/bridge.lock is held); not starting a second one", file=sys.stderr)
         return 5
-    secrets = common.take_secrets()
+    secrets = common.take_secrets((*common.REQUIRED_ENV,
+                                   *common.route_env_names(common.load_config(home))))
 
     pidfile = home / "run" / "bridge.pid"
     pidfile.parent.mkdir(parents=True, exist_ok=True)

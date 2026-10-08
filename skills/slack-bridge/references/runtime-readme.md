@@ -33,6 +33,7 @@ contains them and no script writes them to disk or logs.
 | `SLACK_APP_TOKEN` | App-Level Token with `connections:write`, `xapp-…` (Basic Information) |
 | `GROK_WEBHOOK_URL` | the agent webhook routine URL (https) |
 | `GROK_WEBHOOK_AUTH` | the full `Authorization` header value for that webhook, e.g. `Bearer …` |
+| *(optional)* names listed in `session_routing.channels.*.webhook_url_env` / `webhook_auth_env` | URL + `Authorization` of a dedicated per-channel agent |
 
 ## Handling a forwarded message (for the agent)
 
@@ -49,6 +50,8 @@ Each forwarded operation arrives at the webhook as one JSON payload
   "text": "message text with the bot mention removed",
   "ts": "1712345678.000100", "thread_ts": null, "files": [],
   "thread": {"thread_key": "…", "task_id": 1, "state": "active", "bot_turns": 0},
+  "routing": {"target": "main" | "dedicated", "busy_policy": "interrupt_merge" | "queue",
+              "source": "default" | "channel", "label": "", "webhook": "default" | "dedicated"},
   "reply": {"channel": "D0…", "thread_ts": null,
             "command": "@HOME@/scripts/reply.sh --op Ev0… --channel D0… --ack-ts 1712… <<'EOF'\n<your reply>\nEOF",
             "no_reply_command": "@HOME@/scripts/reply.sh --op Ev0… --channel D0… --no-reply --ack-ts 1712…"},
@@ -56,10 +59,36 @@ Each forwarded operation arrives at the webhook as one JSON payload
 }
 ```
 
-1. `type: bridge_ping` is a connectivity test: do nothing. Each Slack
-   message starts its own run; if a new one arrives while you are still
-   working, the bridge may hold it ("排队中…") and deliver it after you
-   finish, so later messages of a thread arrive in order.
+1. `type: bridge_ping` is a connectivity test: do nothing.
+   **Routing — who handles the message** (`routing`, see
+   `docs/session-model.md` in the source repository). Every Slack message
+   starts its own short webhook run; the run is not where the conversation
+   lives.
+   - `routing.target == "main"` (DMs and every channel without its own
+     agent): **hand the whole payload to the owner's main Grok Bot
+     conversation** and end this run without replying yourself. The main
+     conversation has the shared, ordered context of all Slack work; it
+     answers with the payload's `reply.command` (it keeps `--op`, so the
+     operation is recorded as `completed`).
+   - `routing.target == "dedicated"`: this channel has its own agent (this
+     webhook belongs to it); handle the message in this agent's
+     conversation the same way.
+   - `routing.busy_policy` tells the handling conversation what to do when
+     a message arrives while it is still working:
+     `interrupt_merge` (default): pause at a safe point, merge a follow-up
+     from the **same** thread/DM into the unfinished work and send one
+     combined answer with the newest operation's `reply.command`; close the
+     merged earlier operations with their `no_reply_command --reason
+     "merged into Ev…"`. A message from another thread is its own task:
+     answer it, then resume. `queue`: finish the current task first, then
+     take messages in arrival order. Either way every `operation_id` gets
+     exactly one `reply.sh --op …` (reply or `--no-reply`).
+   - `routing.fallback` set: a dedicated route was configured but its env
+     variables were missing, so the message went to the default (main)
+     webhook; handle it as `main`.
+   Separately, if the webhook itself answers "busy" (e.g. a routine run is
+   still starting), the bridge holds the message ("排队中…") and retries
+   later, keeping thread order.
 2. **Trust.** Act on the owner's private data, accounts, files, tools or
    approvals only when `is_owner` is `true` (`permissions` then includes
    `files`, `approve`, `admin`). Everyone else, including every bot
@@ -130,13 +159,14 @@ EOF
 | Thread task states | `slackctl.sh threads` |
 | Explain an access decision | `slackctl.sh access check --user U… [--bot-id B… --app-id A…] --channel C… --entry mention` |
 | Validate access config | `slackctl.sh access validate` |
-| Upgrade an old config | `slackctl.sh migrate-config [--dry-run]` |
+| Upgrade an old config (adds missing access/routing keys) | `slackctl.sh migrate-config [--dry-run]` |
+| Which conversation handles a channel | `slackctl.sh routing [--channel C…]` |
 | Record the owner | `@HOME@/scripts/set-owner.sh U0123456789` |
 | Change a setting | `@HOME@/scripts/slackctl.sh config set <key> <value>` |
 | Switch agent/account, rotate tokens | export new values, then `@HOME@/scripts/reconfigure.sh` |
 
-The bridge must be started from a shell that has the four variables in its
-environment; it removes them from its own environment after reading them,
+The bridge must be started from a shell that has the four variables (and
+any dedicated-route variables) in its environment; it removes them from its own environment after reading them,
 so nothing it spawns inherits them. After the machine restarts, run
 `start.sh` again. `config.json` changes are picked up live (except
 `outbox_*`); env changes need `restart.sh` (or `reconfigure.sh`).
@@ -161,6 +191,8 @@ most important ones:
 | `max_bot_turns` / `bot_cooldown_seconds` | `4` / `10` | bot loop limits per thread task |
 | `report_channel` / `report_thread_ts` | `""` | where restarts and webhook failures are reported |
 | `agent_sessions` | `true` | Slack agent view when available |
+| `session_routing` | `{"default": "main", "channels": {}}` | who handles a channel: the main conversation, or a dedicated agent (`target: dedicated` + env var **names** for its webhook) |
+| `busy_policy` | `interrupt_merge` | `interrupt_merge` \| `queue`: what the handling conversation does with a message that arrives while it works |
 
 Configuration pitfalls (scopes, reinstalling, inviting the bot, agent view,
 YAML): `references/config-pitfalls.md`.

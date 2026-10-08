@@ -34,6 +34,16 @@ posts the answer as the bot and closes the operation.
   `max_bot_turns`, `bot_cooldown_seconds`; `stop`/`停` stops a thread
   (checked before enqueue, before submit and in `reply.sh`), owner `new`
   resets; bot threads stay paused after restarts.
+- **Session routing** ([docs/session-model.md](../../docs/session-model.md)):
+  each Slack message starts its own routine run, so the run only
+  dispatches. `payload.routing.target` `main` (DMs and channels without
+  their own agent; `session_routing.default`): hand the payload to the
+  owner's main Grok Bot conversation, which keeps one shared, ordered
+  context and answers with `reply.sh --op`. `dedicated`: a channel listed in
+  `session_routing.channels` is posted to its own agent's webhook (env var
+  **names** `webhook_url_env`/`webhook_auth_env`; unset → default webhook).
+  `busy_policy` `interrupt_merge` (default) | `queue` is passed through for
+  the handling conversation; bridge busy-retry is unchanged.
 - **Monitoring**: `status.sh` separates process health from task state;
   restarts and repeated webhook failures go to `report_channel`.
 
@@ -43,7 +53,7 @@ Setup traps (reinstall after scope changes, `/invite`, `app_home_opened`,
 
 Secrets are environment variables only: `SLACK_BOT_TOKEN` (xoxb-),
 `SLACK_APP_TOKEN` (xapp-, `connections:write`), `GROK_WEBHOOK_URL`,
-`GROK_WEBHOOK_AUTH`. Never write them to files, config, logs or chat.
+`GROK_WEBHOOK_AUTH` (plus the variables a dedicated route names). Never write them to files, config, logs or chat.
 `config.json` holds only non-secret settings and refuses token-like values.
 
 ## Commands
@@ -61,7 +71,8 @@ reply.sh --op OP --channel C [--thread-ts T] --no-reply [--reason R]   record a 
 set-owner.sh U…                              record the owner's member ID (drives is_owner)
 slackctl.sh health|ops|threads               process health vs task state; resolve operations
 slackctl.sh access check|validate            explain an access decision / lint the access config
-slackctl.sh migrate-config                   upgrade a pre-access config (backup first)
+slackctl.sh migrate-config                   add missing access/routing keys (backup first)
+slackctl.sh routing [--channel C]            effective session route per channel (env names only)
 slackctl.sh upload|download                  files (files:write / files:read)
 slackctl.sh thread|react|session|whoami|config|render-manifest …
 ```
@@ -69,6 +80,14 @@ slackctl.sh thread|react|session|whoami|config|render-manifest …
 ## Answering a forwarded message
 
 1. Parse the payload ([format v2](references/payload.md)). Ignore `type: bridge_ping`.
+   **Routing:** if `routing.target` is `main` (or `routing.fallback` is
+   set) and you are the routine run, hand the whole payload to the owner's
+   main Grok Bot conversation and stop; the main conversation does steps
+   2–7. If `dedicated`, this agent handles it. Apply `routing.busy_policy`
+   when a message arrives mid-task: `interrupt_merge` merges same-thread
+   follow-ups into one answer (close merged ops with `--no-reply --reason
+   "merged into Ev…"`), `queue` finishes first. Every operation gets exactly
+   one `reply.sh --op`.
 2. Act on the owner's private data, accounts, files or approvals only when
    `is_owner` is true (`permissions` has `files`/`approve`/`admin`). Others,
    and every bot (`actor_type: "bot"`), get general help only and never the

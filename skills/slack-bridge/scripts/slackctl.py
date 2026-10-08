@@ -358,20 +358,43 @@ def stop_gate(st, op_id: str | None, channel: str, thread_ts: str | None) -> str
 
 
 def clear_ack(client, cfg: dict, channel: str, ack_ts: str | None, ack_reaction: str | None,
-              done_reaction: str | None) -> None:
-    if not ack_ts:
-        return
-    name = ack_reaction or cfg.get("ack_reaction") or "eyes"
-    try:
-        client.reactions_remove(channel=channel, timestamp=ack_ts, name=name)
-    except Exception as exc:
-        if slack_error(exc) not in ("no_reaction",):
-            print(f"slackctl: note: could not remove :{name}: ({slack_error(exc)})", file=sys.stderr)
-    if done_reaction:
+              done_reaction: str | None, st=None, op_id: str | None = None) -> str | None:
+    """Undo the bridge's receipt ack after the final reply / --no-reply (best effort).
+
+    With --op the bridge recorded what it did (reaction or assistant status) in the
+    state database; otherwise fall back to removing the configured reaction from
+    --ack-ts. Returns what was cleared ("reaction", "status") or None."""
+    info = None
+    if st is not None and op_id:
+        try:
+            raw = st.meta_pop(f"ack:{op_id}")
+            info = json.loads(raw) if raw else None
+        except Exception:
+            info = None
+    cleared = None
+    if info and info.get("kind") == "status":
+        resp = api_json(client, "assistant.threads.setStatus",
+                        {"channel_id": info.get("channel") or channel,
+                         "thread_ts": info.get("thread_ts"), "status": ""})
+        cleared = "status" if resp.get("ok") else None
+    else:
+        target_ts = (info or {}).get("ts") or ack_ts
+        if target_ts and (info or ack_ts):
+            name = (info or {}).get("name") or ack_reaction or common.ack_settings(cfg)["emoji"]
+            try:
+                client.reactions_remove(channel=(info or {}).get("channel") or channel,
+                                        timestamp=target_ts, name=name.strip(":"))
+                cleared = "reaction"
+            except Exception as exc:
+                if slack_error(exc) not in ("no_reaction",):
+                    print(f"slackctl: note: could not remove :{name}: ({slack_error(exc)})",
+                          file=sys.stderr)
+    if done_reaction and ack_ts:
         try:
             client.reactions_add(channel=channel, timestamp=ack_ts, name=done_reaction.strip(":"))
         except Exception:
             pass
+    return cleared
 
 
 def cmd_reply(args) -> int:
@@ -390,7 +413,7 @@ def cmd_reply(args) -> int:
             if not gate else "stopped"
         session = set_session(client, home, args.channel, args.thread_ts, args.session_status or "active") \
             if (args.session_status or args.thread_ts) else None
-        clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, None)
+        clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, None, st, args.op)
         out = {"ok": True, "sent": False, "operation": args.op, "operation_state": state}
         if session is not None:
             out["session_status"] = "active" if session.get("ok") else f"error: {session.get('error')}"
@@ -412,7 +435,9 @@ def cmd_reply(args) -> int:
     if args.op:
         state = "accepted (interim)" if args.session_status == "processing" else \
             finish_op(st, args.op, "completed", f"replied ts={sent[-1] if sent else ''}")
-    clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, args.done_reaction)
+    if args.session_status != "processing":  # an interim update keeps the receipt ack
+        clear_ack(client, cfg, args.channel, args.ack_ts, args.ack_reaction, args.done_reaction,
+                  st, args.op)
     out = {"ok": True, "channel": args.channel, "thread_ts": args.thread_ts, "ts": sent,
            "operation": args.op, "operation_state": state}
     if session is not None:
@@ -880,6 +905,27 @@ def check_webhook_tls(url: str, timeout: float = 8) -> tuple[bool, str]:
         return False, f"{parsed.hostname}: {exc}"
 
 
+def ack_scope_check(cfg: dict, auth) -> tuple[bool | None, str, str]:
+    """doctor row: can the configured receipt ack work with the granted scopes?"""
+    ack = common.ack_settings(cfg)
+    scopes = common.granted_scopes(auth)
+    name = "receipt ack"
+    if ack["mode"] == "none":
+        return True, name, "ack.mode=none (no receipt acknowledgement)"
+    if scopes is None:
+        return None, name, f"ack.mode={ack['mode']}; granted scopes unknown (no x-oauth-scopes header)"
+    react, status = "reactions:write" in scopes, "assistant:write" in scopes
+    if ack["mode"] == "reaction" and not react:
+        return None, name, ("reactions:write not granted: :%s: cannot be added; falls back to the "
+                            "assistant status %s. Reinstall the app in Slack after adding the scope."
+                            % (ack["emoji"], "in DMs/agent threads" if status else "(also unavailable)"))
+    if ack["mode"] == "status" and not status:
+        return None, name, "assistant:write not granted: status ack unavailable, using the reaction"
+    detail = f":{ack['emoji']}: reaction" if ack["mode"] == "reaction" else f"assistant status '{ack['status_text']}'"
+    return True, name, (f"ack.mode={ack['mode']}: {detail}; reactions:write={'yes' if react else 'no'}, "
+                        f"assistant:write={'yes' if status else 'no'}")
+
+
 def cmd_doctor(args) -> int:
     home = common.resolve_home(args.home)
     results: list[tuple[str, str, str]] = []  # (status, check, detail)
@@ -947,6 +993,7 @@ def cmd_doctor(args) -> int:
             auth = WebClient(token=common.env_value(common.ENV_BOT_TOKEN)).auth_test()
             add(True, "bot token (auth.test)",
                 f"@{auth.get('user')} {auth.get('user_id')} in {auth.get('team')} ({auth.get('team_id')})")
+            add(*ack_scope_check(cfg, auth))
             if cfg_file.exists():
                 changed = False
                 for key, val in (("bot_user_id", auth.get("user_id")), ("team_id", auth.get("team_id")),
@@ -1042,8 +1089,9 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("reply", help="post a message as the bot")
     r.add_argument("--channel", required=True)
     r.add_argument("--thread-ts", help="reply inside this thread")
-    r.add_argument("--ack-ts", help="remove the receipt reaction from this message after replying")
-    r.add_argument("--ack-reaction", help="reaction name to remove (default: config ack_reaction)")
+    r.add_argument("--ack-ts", help="message the bridge acknowledged; its receipt ack (the reaction, or "
+                   "the assistant status recorded for --op) is removed after the final reply")
+    r.add_argument("--ack-reaction", help="reaction name to remove (default: config ack.emoji)")
     r.add_argument("--done-reaction", help="optional reaction to add to --ack-ts after replying")
     r.add_argument("--format", choices=("markdown", "mrkdwn", "plain"), default="markdown")
     r.add_argument("--op", help="operation_id from the payload; marks it completed after posting")

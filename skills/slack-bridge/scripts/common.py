@@ -181,6 +181,21 @@ def normalize_auth_header(value: str) -> str:
     return value
 
 
+def granted_scopes(auth: Any) -> set[str] | None:
+    """Scopes granted to the token, from auth.test's x-oauth-scopes header (no token involved)."""
+    headers = getattr(auth, "headers", None) or {}
+    try:
+        items = dict(headers).items()
+    except Exception:
+        return None
+    for k, v in items:
+        if str(k).lower() == "x-oauth-scopes":
+            if isinstance(v, (list, tuple)):
+                v = ",".join(v)
+            return {s.strip() for s in str(v).split(",") if s.strip()}
+    return None
+
+
 def webhook_host(url: str) -> str:
     """Host part of a URL, safe to print (no path, query, or credentials)."""
     m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/]*@)?([^/:?#]+)", url or "")
@@ -246,8 +261,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "error_text": "Sorry, something went wrong on my side. The owner can check the bridge log.",
     "slash_ack_text": "Got it. I'll answer in our DM.",
     "slash_usage_text": "Usage: /grok <question or task>",
-    "react_on_receipt": True,
-    "ack_reaction": "eyes",
+    # Receipt acknowledgement, done by the bridge itself as soon as a message is
+    # accepted for forwarding (the routine run posts nothing). reaction: add
+    # :emoji: to the message, falling back to the assistant status when the
+    # reaction fails; status: assistant.threads.setStatus(status_text) where
+    # Slack allows it (DMs / agent threads), else the reaction; none: nothing.
+    # reply.sh --op removes it after the final reply or --no-reply.
+    # (Replaces the legacy react_on_receipt / ack_reaction keys.)
+    "ack": {"mode": "reaction", "emoji": "eyes", "status_text": "正在处理…"},
     "error_reaction": "warning",
     "dm_reply_in_thread": False,
     "forward_raw_event": True,
@@ -275,6 +296,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "catchup_window_hours": 24,
     "retention_days": 30,
 }
+
+ACK_MODES = ("reaction", "status", "none")
+LEGACY_ACK_KEYS = ("react_on_receipt", "ack_reaction")
 
 ACCESS_MODES = ("everyone", "allowlist", "owner_only")
 BOT_ACCESS_MODES = ("none", "allowlist", "all")
@@ -307,7 +331,43 @@ def load_config(home: Path) -> dict[str, Any]:
         # Legacy (pre-stage-2) key: honour an explicit old setting until migrated.
         if "access" in data and "human_access" not in data:
             cfg["human_access"] = data["access"] if data["access"] in ACCESS_MODES else "owner_only"
+        if "ack" not in data and any(k in data for k in LEGACY_ACK_KEYS):
+            cfg["ack"] = legacy_ack(data)
     return cfg
+
+
+def legacy_ack(data: dict[str, Any]) -> dict[str, Any]:
+    """`ack` equivalent of the legacy react_on_receipt / ack_reaction keys."""
+    ack = dict(DEFAULT_CONFIG["ack"])
+    if data.get("react_on_receipt") is False or (
+            "ack_reaction" in data and not str(data.get("ack_reaction") or "").strip(": ")):
+        ack["mode"] = "none"
+    if str(data.get("ack_reaction") or "").strip(": "):
+        ack["emoji"] = str(data["ack_reaction"]).strip().strip(":")
+    return ack
+
+
+def ack_settings(cfg: dict[str, Any]) -> dict[str, str]:
+    """Effective receipt ack: {"mode", "emoji", "status_text"} (invalid values -> defaults)."""
+    default = DEFAULT_CONFIG["ack"]
+    raw = cfg.get("ack")
+    if not isinstance(raw, dict):
+        raw = legacy_ack(cfg) if any(k in cfg for k in LEGACY_ACK_KEYS) else default
+    mode = raw.get("mode") if raw.get("mode") in ACK_MODES else default["mode"]
+    emoji = str(raw.get("emoji") or default["emoji"]).strip().strip(":") or default["emoji"]
+    text = str(raw.get("status_text") or default["status_text"]).strip() or default["status_text"]
+    return {"mode": mode, "emoji": emoji, "status_text": text}
+
+
+def validate_ack(cfg: dict[str, Any]) -> list[str]:
+    raw = cfg.get("ack")
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        return ["ack must be an object like {\"mode\": \"reaction\", \"emoji\": \"eyes\"}"]
+    if raw.get("mode", "reaction") not in ACK_MODES:
+        return [f"ack.mode must be one of {ACK_MODES} (treated as reaction)"]
+    return []
 
 
 def migrate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -329,6 +389,15 @@ def migrate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if key not in out:
             out[key] = DEFAULT_CONFIG[key]
             notes.append(f"added {key}={json.dumps(DEFAULT_CONFIG[key])}")
+    if "ack" not in out:
+        had = {k: out[k] for k in LEGACY_ACK_KEYS if k in out}
+        out["ack"] = legacy_ack(out)
+        notes.append(f"added ack={json.dumps(out['ack'], ensure_ascii=False)}"
+                     + (f" (from {json.dumps(had)})" if had else ""))
+    for k in LEGACY_ACK_KEYS:
+        if k in out:
+            out.pop(k)
+            notes.append(f"removed legacy {k} (now ack)")
     return out, notes
 
 
@@ -387,7 +456,7 @@ def coerce_config_value(key: str, raw: str) -> Any:
         if not isinstance(value, type(default)):
             raise ValueError(f"{key} expects a JSON {type(default).__name__}")
         return value
-    if key in ("ack_reaction", "error_reaction"):
+    if key == "error_reaction":
         return raw.strip().strip(":")
     return raw
 
@@ -519,14 +588,16 @@ def build_payload(msg, cfg: dict[str, Any], home: Path, *, entry: str,
     base = [str(home / "scripts" / "reply.sh"), "--op", msg.op_id, "--channel", target["channel"] or ""]
     if target["thread_ts"]:
         base += ["--thread-ts", target["thread_ts"]]
+    ack = ack_settings(cfg)
     reply_cmd = list(base)
-    if cfg.get("react_on_receipt") and cfg.get("ack_reaction") and not session:
-        reply_cmd += ["--ack-ts", msg.ts]
+    # --ack-ts: reply.sh removes the bridge's receipt ack (👀 or the assistant
+    # status, whichever the bridge recorded for --op) after the final answer.
+    ack_args = ["--ack-ts", msg.ts] if ack["mode"] != "none" and msg.ts else []
+    reply_cmd += ack_args
     if session:
         reply_cmd += ["--session-status", "active"]
-    no_reply_cmd = base + ["--no-reply"]
-    if cfg.get("react_on_receipt") and cfg.get("ack_reaction") and not session:
-        no_reply_cmd += ["--ack-ts", msg.ts]
+    no_reply_cmd = base + ["--no-reply"] + ack_args
+    rt = routing or route_for(cfg, msg.channel)
     is_owner = bool(owner) and msg.user == owner and msg.actor_type == "human"
     payload: dict[str, Any] = {
         "source": "slack-bridge",
@@ -569,13 +640,40 @@ def build_payload(msg, cfg: dict[str, Any], home: Path, *, entry: str,
         "agent_session": ({"channel": target["channel"], "thread_ts": target["thread_ts"],
                            "status": session.get("status", "processing")} if session else None),
         "viewing_context": viewing or None,
-        "routing": {k: v for k, v in (routing or route_for(cfg, msg.channel)).items()
+        "routing": {k: v for k, v in rt.items()
                     if k in ("target", "busy_policy", "source", "label", "webhook", "fallback",
                              "webhook_url_env", "webhook_auth_env")},
+        # The bridge already acknowledged the message in Slack; the routine run
+        # must not post anything itself (no interim "收到…").
+        "acknowledged": {"by": "bridge", "mode": ack["mode"],
+                         "emoji": ack["emoji"] if ack["mode"] != "none" else ""},
+        "handling": handling_instructions(rt),
     }
     if cfg.get("forward_raw_event", True):
         payload["raw_event"] = event
     return payload
+
+
+def handling_instructions(routing: dict[str, Any]) -> dict[str, Any]:
+    """What the routine run that receives this payload should do (payload.handling)."""
+    if routing.get("target") == "dedicated" and not routing.get("fallback"):
+        return {
+            "routine_run": "answer",
+            "post_to_slack": "final_reply_only",
+            "instructions": ("Dedicated route: this agent handles the message itself. The bridge "
+                             "already acknowledged it in Slack; do not post an interim message. "
+                             "Answer once with reply.command (or reply.no_reply_command)."),
+        }
+    return {
+        "routine_run": "silent_handoff",
+        "post_to_slack": "never",
+        "instructions": ("Main route: post NOTHING to Slack from the routine run (the bridge already "
+                         "acknowledged the message). Hand this payload to the owner's main "
+                         "conversation exactly once: event_id/operation_id, channel, thread_ts, "
+                         "user, is_owner, permissions, text, files, routing.busy_policy, and "
+                         "reply.command / reply.no_reply_command verbatim. Then end the run. The "
+                         "main conversation sends the only reply with reply.command."),
+    }
 
 
 # ---------------------------------------------------------------------------

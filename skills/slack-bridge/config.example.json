@@ -62,8 +62,11 @@
   "error_text": "Sorry, something went wrong on my side. The owner can check the bridge log.",
   "slash_ack_text": "Got it. I'll answer in our DM.",
   "slash_usage_text": "Usage: /grok <question or task>",
-  "react_on_receipt": true,
-  "ack_reaction": "eyes",
+  "ack": {
+    "mode": "reaction",
+    "emoji": "eyes",
+    "status_text": "正在处理…"
+  },
   "error_reaction": "warning",
   "dm_reply_in_thread": false,
   "forward_raw_event": true,

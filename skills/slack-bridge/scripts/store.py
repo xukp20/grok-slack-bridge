@@ -457,6 +457,7 @@ class Store:
                 f"SELECT op_id FROM receipts WHERE updated_at<? AND state IN ({ts})",
                 (cutoff, *TERMINAL)).fetchall()]
             for op in ids:
+                self.db.execute("DELETE FROM meta WHERE key=?", (f"ack:{op}",))
                 self.db.execute("DELETE FROM transitions WHERE op_id=?", (op,))
                 self.db.execute("DELETE FROM receipts WHERE op_id=?", (op,))
         return len(ids)
@@ -485,6 +486,14 @@ class Store:
                                 "DO UPDATE SET value=excluded.value", (key, value))
                 return value
             row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def meta_pop(self, key: str) -> str | None:
+        """Read and delete a meta value."""
+        with self.lock:
+            row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            if row:
+                self.db.execute("DELETE FROM meta WHERE key=?", (key,))
         return row["value"] if row else None
 
 

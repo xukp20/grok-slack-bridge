@@ -101,6 +101,7 @@ class Bridge:
         self.sessions_unavailable_logged = False
         self.delivery_thread: threading.Thread | None = None
         self.denied_at: dict[str, float] = {}
+        self.granted_scopes: set[str] | None = None  # from auth.test x-oauth-scopes; None = unknown
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None:
@@ -109,6 +110,7 @@ class Bridge:
 
         self.web = WebClient(token=self.secrets.get(common.ENV_BOT_TOKEN, ""))
         auth = self.web.auth_test()
+        self.granted_scopes = common.granted_scopes(auth)
         self.ident.bot_user_id = auth.get("user_id", "")
         self.ident.bot_id = auth.get("bot_id", "")
         self.ident.team_id = auth.get("team_id", "")
@@ -119,6 +121,7 @@ class Bridge:
                         common.slack_error_code(exc), self.cfg.get("app_id") or "(unknown)")
             self.ident.app_id = self.cfg.get("app_id", "")
         self._remember_identity(auth)
+        self.check_ack_scopes()
         log.info("authenticated as @%s (%s) app=%s in %s (%s)", auth.get("user"),
                  self.ident.bot_user_id, self.ident.app_id or "?", auth.get("team"), auth.get("team_id"))
 
@@ -151,6 +154,18 @@ class Bridge:
             except Exception as exc:  # pragma: no cover - best effort
                 log.warning("could not update config.json: %s", exc)
 
+    def check_ack_scopes(self) -> None:
+        """Warn (scope names only) when the configured receipt ack cannot work as set up."""
+        if self.granted_scopes is None:
+            return
+        ack = common.ack_settings(self.cfg)
+        if ack["mode"] == "reaction" and "reactions:write" not in self.granted_scopes:
+            log.warning("bot token lacks reactions:write: the :%s: receipt ack falls back to the "
+                        "assistant status (DMs/agent threads only). Add the scope (manifest has it) "
+                        "and reinstall the app in Slack.", ack["emoji"])
+        if ack["mode"] != "none" and "assistant:write" not in self.granted_scopes:
+            log.info("bot token lacks assistant:write: no assistant-status receipt fallback")
+
     def start_workers(self) -> None:
         """Recover persisted state and start the delivery worker."""
         recovered = self.store.recover_after_restart()
@@ -174,7 +189,7 @@ class Bridge:
                 continue
             log.info("deciding receipt %s left in 'received' before the restart", row["op_id"])
             self.process(msg, row["thread_key"])
-        problems = access.validate(self.cfg) + common.validate_routing(self.cfg)
+        problems = access.validate(self.cfg) + common.validate_routing(self.cfg) + common.validate_ack(self.cfg)
         for problem in problems:
             log.warning("config: %s", problem)
         self.outbox.start()
@@ -477,9 +492,6 @@ class Bridge:
         if msg.actor_type == "bot":
             thread = self.store.add_bot_turn(thread["thread_key"]) or thread
         session = self.open_session(msg)
-        reaction = self.cfg.get("ack_reaction") if self.cfg.get("react_on_receipt") else ""
-        if reaction and msg.ts and not session and not self.dry_run and self.web is not None:
-            self._safe(self.web.reactions_add, channel=msg.channel, timestamp=msg.ts, name=reaction)
         routing = self.route(msg.channel)
         payload = common.build_payload(
             msg, self.cfg, self.public_home, entry=decision.entry, routing=routing, thread=thread,
@@ -491,7 +503,84 @@ class Bridge:
         self.store.transition(msg.op_id, "queued", decision.reason, payload=payload,
                               task_id=thread.get("task_id"), not_before=decision.not_before or None)
         self.wake.set()
+        # Acknowledge after queueing: delivery never waits on (or fails because of) the ack.
+        try:
+            self.acknowledge(msg, session)
+        except Exception as exc:  # pragma: no cover - acknowledge() is already best effort
+            log.warning("receipt ack for %s failed: %s", msg.op_id, common.slack_error_code(exc))
         return "queued"
+
+    # -- receipt acknowledgement (done by the bridge, not the routine run) ----------
+    def can_set_status(self, msg: events.Msg, session: dict | None) -> bool:
+        """assistant.threads.setStatus only works in DMs/agent threads and needs assistant:write."""
+        if self.granted_scopes is not None and "assistant:write" not in self.granted_scopes:
+            return False
+        return bool(session) or msg.is_dm
+
+    def acknowledge(self, msg: events.Msg, session: dict | None = None) -> str:
+        """Show the user right away that the message was received: a reaction (default) or
+        the assistant status. Best effort; records what was done so reply.sh --op can undo it.
+        Returns "reaction", "status" or "none"."""
+        ack = common.ack_settings(self.cfg)
+        if ack["mode"] == "none" or self.dry_run or self.web is None or not msg.ts:
+            return "none"
+        status_ts = (session or {}).get("thread_ts") or msg.root_ts
+        if ack["mode"] == "status" and self.can_set_status(msg, session):
+            if self.set_ack_status(msg, status_ts, ack["status_text"]):
+                return "status"
+        reaction_ok, why = False, "scope reactions:write not granted"
+        if self.granted_scopes is None or "reactions:write" in self.granted_scopes:
+            try:
+                self.web.reactions_add(channel=msg.channel, timestamp=msg.ts, name=ack["emoji"])
+                reaction_ok = True
+            except Exception as exc:
+                why = common.slack_error_code(exc)
+                reaction_ok = why == "already_reacted"
+        if reaction_ok:
+            self.store.meta(f"ack:{msg.op_id}", json.dumps(
+                {"kind": "reaction", "channel": msg.channel, "ts": msg.ts, "name": ack["emoji"]}))
+            return "reaction"
+        log.warning("receipt reaction :%s: on %s failed (%s)%s", ack["emoji"], msg.op_id, why,
+                    "; using the assistant status instead"
+                    if ack["mode"] == "reaction" and self.can_set_status(msg, session) else "")
+        if ack["mode"] == "reaction" and self.can_set_status(msg, session):
+            if self.set_ack_status(msg, status_ts, ack["status_text"]):
+                return "status"
+        return "none"
+
+    def set_ack_status(self, msg: events.Msg, thread_ts: str, text: str) -> bool:
+        if not thread_ts:
+            return False
+        try:
+            resp = self.slack_api("assistant.threads.setStatus", {
+                "channel_id": msg.channel, "thread_ts": thread_ts, "status": text})
+        except Exception as exc:
+            resp = {"ok": False, "error": common.slack_error_code(exc)}
+        if not resp.get("ok"):
+            log.info("assistant status ack for %s unavailable (%s)", msg.op_id, resp.get("error"))
+            return False
+        self.store.meta(f"ack:{msg.op_id}", json.dumps(
+            {"kind": "status", "channel": msg.channel, "thread_ts": thread_ts}))
+        return True
+
+    def clear_ack(self, op_id: str) -> None:
+        """Undo the receipt ack of an operation that will not get a reply (e.g. stopped)."""
+        raw = self.store.meta_pop(f"ack:{op_id}")
+        if not raw or self.web is None or self.dry_run:
+            return
+        try:
+            info = json.loads(raw)
+        except ValueError:
+            return
+        if info.get("kind") == "reaction":
+            self._safe(self.web.reactions_remove, channel=info["channel"], timestamp=info["ts"],
+                       name=info["name"])
+        elif info.get("kind") == "status":
+            try:
+                self.slack_api("assistant.threads.setStatus", {
+                    "channel_id": info["channel"], "thread_ts": info["thread_ts"], "status": ""})
+            except Exception:
+                pass
 
     # -- slash commands and buttons (same access check) ---------------------
     def slash_actor(self, payload: dict) -> access.Actor:
@@ -726,8 +815,10 @@ class Bridge:
             self._safe(fn, channel=op["channel"], timestamp=op["ts"], name=name)
 
     def clear_waiting(self, op_ids: list[str]) -> None:
-        """Stopped operations that were waiting on a busy webhook: drop ⏳ / Working…."""
+        """Stopped operations: drop the receipt ack and, if they waited on a busy webhook,
+        ⏳ / Working…."""
         for op_id in op_ids:
+            self.clear_ack(op_id)
             op = self.store.get(op_id)
             if not op or not op.get("attempts"):
                 continue

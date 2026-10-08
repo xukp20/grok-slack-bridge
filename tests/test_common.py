@@ -53,9 +53,10 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(common.load_config(home)["agent_label"], "")
 
     def test_coercion(self):
-        self.assertIs(common.coerce_config_value("react_on_receipt", "off"), False)
+        self.assertIs(common.coerce_config_value("agent_sessions", "off"), False)
         self.assertEqual(common.coerce_config_value("webhook_retries", "5"), 5)
-        self.assertEqual(common.coerce_config_value("ack_reaction", ":eyes:"), "eyes")
+        self.assertEqual(common.coerce_config_value("error_reaction", ":warning:"), "warning")
+        self.assertEqual(common.coerce_config_value("ack", '{"mode": "status"}'), {"mode": "status"})
         with self.assertRaises(ValueError):
             common.coerce_config_value("human_access", "anyone")
 
@@ -126,7 +127,7 @@ class PayloadTests(unittest.TestCase):
 
     def test_dm_top_level_unless_threaded(self):
         ev = {"type": "message", "channel_type": "im", "user": "U2", "channel": "D1", "ts": "2.2"}
-        cfg = dict(common.DEFAULT_CONFIG, owner_user_id="U1", react_on_receipt=False)
+        cfg = dict(common.DEFAULT_CONFIG, owner_user_id="U1", ack={"mode": "none"})
         p = common.build_payload(msg_of({"event": ev}), cfg, Path("/h"), entry="dm")
         self.assertIsNone(p["reply"]["thread_ts"])
         self.assertFalse(p["is_owner"])
@@ -197,7 +198,8 @@ class AgentSessionTests(unittest.TestCase):
                                  viewing={"channel_ids": ["C9"], "updated_at": 1})
         self.assertEqual(p["reply"]["thread_ts"], "100.1")
         self.assertIn("--session-status active", p["reply"]["command"])
-        self.assertNotIn("--ack-ts", p["reply"]["command"])
+        # The bridge's 👀 is added in agent sessions too; the reply removes it.
+        self.assertIn("--ack-ts", p["reply"]["command"])
         self.assertEqual(p["agent_session"]["thread_ts"], "100.1")
         self.assertEqual(p["viewing_context"]["channel_ids"], ["C9"])
 

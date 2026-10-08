@@ -19,9 +19,14 @@
 | `reply.channel`, `reply.thread_ts` | | where to answer |
 | `reply.command` | string | ready-to-run `reply.sh` invocation with a heredoc placeholder |
 | `reply.readme` | string | path of the runtime README |
+| `agent_session` | object \| null | `{channel, thread_ts, status}` when the bridge put the thread in an agent session ("Working…"); replies then go in `thread_ts` and `reply.command` includes `--session-status active`. `null` without the agent view |
+| `viewing_context` | object \| null | `{channel_ids: [...], updated_at}`: the channel(s) the user last had open next to the bot (`app_context_changed`) |
 | `raw_event` | object | the untouched Slack event (`forward_raw_event`) |
 
-Filtering before forwarding: only `app_mention` and DM `message` events;
+Filtering before forwarding: only `app_mention` and DM `message` events
+(agent events `app_context_changed`, `agent_session_stopped` and
+`agent_session_title_changed` are handled inside the bridge and never
+forwarded);
 messages from bots or the bot itself, edits, deletions, joins and other
 subtypes (except `file_share`/`thread_broadcast`) are dropped; retries are
 deduplicated by `event_id` and `channel:ts`. With `access: owner_only`,

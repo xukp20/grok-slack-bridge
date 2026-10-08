@@ -174,9 +174,12 @@ only), and the Cursor Slack app with a Slack-listener routine on a channel
 explains when each is the better fit. Its "Recommended combination" section
 explains why we keep the Grok Slack connector next to the bot.
 
-[docs/assistant-view.md](docs/assistant-view.md) explains Slack's "Agents & AI
-Apps" assistant view (side panel, per-chat threads, suggested prompts) and
-what enabling it involves.
+[docs/agent-view.md](docs/agent-view.md) covers Slack's agent features, which
+the bridge supports and the manifest enables: split-view pane, one thread per
+conversation, a "Working…" status with a Stop button, session titles,
+suggested prompts, and the channel the user is looking at. If the Slack app
+does not have the agent view yet, the bridge falls back to plain DMs and the
+👀 reaction automatically.
 
 ## Operations
 
@@ -206,7 +209,7 @@ skills/slack-bridge/
   config.example.json      all config keys with defaults
 docs/
   slack-connection-options.md   alternatives we evaluated and why this design
-  assistant-view.md             Slack "Agents & AI Apps" side panel: what it does, how to enable
+  agent-view.md                 Slack agent features (split view, sessions, Stop, prompts) and how the bridge uses them
   operations.md                 restarts, crashes, failures, self-healing
   publishing.md                 gh device login and first push
 tests/                     unit tests (standard library only)

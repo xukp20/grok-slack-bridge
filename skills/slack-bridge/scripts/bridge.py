@@ -2,9 +2,14 @@
 """Slack Socket Mode -> agent webhook bridge.
 
 Receives `app_mention` and `message.im` events over Socket Mode, acks them
-immediately, filters bot/self/edit/join noise, dedupes retries, optionally
-adds an acknowledgement reaction, and POSTs a compact JSON payload to the
-agent webhook (GROK_WEBHOOK_URL with Authorization: GROK_WEBHOOK_AUTH).
+immediately, filters bot/self/edit/join noise, dedupes retries, marks the
+message as being worked on (an agent session "Working..." status when the app
+has Slack's agent view, otherwise a receipt reaction), and POSTs a compact
+JSON payload to the agent webhook (GROK_WEBHOOK_URL with Authorization:
+GROK_WEBHOOK_AUTH).
+
+Agent-view events (`app_context_changed`, `agent_session_stopped`,
+`agent_session_title_changed`) are handled locally and never forwarded.
 
 Secrets come only from environment variables and are never logged.
 """
@@ -52,6 +57,9 @@ class Bridge:
         self.socket = None
         self.bot_user_id = ""
         self.bot_id = ""
+        # Last app_context_changed per user: what they are looking at in Slack.
+        self.viewing: dict[str, dict] = {}
+        self.sessions_unavailable_logged = False
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None:
@@ -157,6 +165,9 @@ class Bridge:
     def _handle_envelope(self, envelope: dict, retry_attempt=None) -> None:
         event = envelope.get("event") or {}
         self.stats["received"] += 1
+        if event.get("type") in common.AGENT_EVENTS:
+            self.handle_agent_event(envelope, event)
+            return
         ok, reason = common.should_handle(event, self.bot_user_id, self.bot_id)
         if not ok:
             self.stats["skipped"] += 1
@@ -190,12 +201,14 @@ class Bridge:
                            thread_ts=target["thread_ts"], text=msg)
             return
 
+        session = self.open_session(event, user)
         reaction = self.cfg.get("ack_reaction") if self.cfg.get("react_on_receipt") else ""
-        if reaction and not self.dry_run:
+        if reaction and not session and not self.dry_run:
             self._safe(self.web.reactions_add, channel=event.get("channel"),
                        timestamp=event.get("ts"), name=reaction)
 
-        payload = common.build_payload(envelope, self.cfg, self.home, self.user_info(user))
+        payload = common.build_payload(envelope, self.cfg, self.home, self.user_info(user),
+                                       session=session, viewing=self.viewing.get(user))
         if self.dry_run:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             return
@@ -203,10 +216,113 @@ class Bridge:
             self.stats["forwarded"] += 1
         else:
             self.stats["failed"] += 1
+            if session:
+                self.set_session_status(session["channel"], session["thread_ts"], "active")
             err = self.cfg.get("error_reaction")
             if err:
                 self._safe(self.web.reactions_add, channel=event.get("channel"),
                            timestamp=event.get("ts"), name=err)
+
+    # -- agent sessions (Slack agent_view) --------------------------------
+    def slack_api(self, method: str, body: dict) -> dict:
+        """Call a Web API method with a JSON body; returns the response data.
+
+        Raises on transport errors; Slack-level errors come back as ok=false.
+        """
+        from slack_sdk.errors import SlackApiError
+        try:
+            return dict(self.web.api_call(method, json=body).data)
+        except SlackApiError as exc:
+            return dict(getattr(exc.response, "data", None) or {"ok": False, "error": str(exc)})
+
+    def set_session_status(self, channel: str, thread_ts: str, status: str, **extra) -> dict:
+        body = {"channel_id": channel, "thread_ts": thread_ts, "status": status}
+        body.update({k: v for k, v in extra.items() if v})
+        try:
+            return self.slack_api("agents.sessions.setStatus", body)
+        except Exception as exc:  # network etc.
+            return {"ok": False, "error": str(exc)}
+
+    def open_session(self, event: dict, user: str) -> dict | None:
+        """Put the message's thread into an agent session in "processing".
+
+        Returns {"channel", "thread_ts", "status"} on success, None when agent
+        sessions are off or Slack refuses (e.g. the app has no agent view yet),
+        in which case the caller falls back to the receipt reaction.
+        """
+        if not self.cfg.get("agent_sessions", True) or self.dry_run or self.web is None:
+            return None
+        channel = event.get("channel")
+        thread_ts = common.session_thread_ts(event)
+        if not channel or not thread_ts:
+            return None
+        title = ""
+        if not event.get("thread_ts"):
+            title = common.session_title(event.get("text", ""),
+                                         self.cfg.get("session_title_chars", 60))
+        resp = self.set_session_status(channel, thread_ts, "processing",
+                                       title=title, initiator_user_id=user)
+        if not resp.get("ok"):
+            level = log.debug if self.sessions_unavailable_logged else log.info
+            level("agent session unavailable (%s); using reaction fallback. Enable the "
+                  "agent view in the Slack app (see docs/agent-view.md) or set "
+                  "agent_sessions=false.", resp.get("error"))
+            self.sessions_unavailable_logged = True
+            return None
+        self.sessions_unavailable_logged = False
+        self.mark_stopped(channel, thread_ts, clear=True)
+        log.info("agent session processing channel=%s thread=%s", channel, thread_ts)
+        return {"channel": channel, "thread_ts": thread_ts, "status": "processing"}
+
+    def handle_agent_event(self, envelope: dict, event: dict) -> None:
+        etype = event.get("type")
+        with self.dedupe_lock:
+            if self.dedupe.seen(envelope.get("event_id", "")):
+                return
+        self.cfg = common.load_config(self.home)
+        if etype == "app_context_changed":
+            users = [a.get("user_id") for a in envelope.get("authorizations") or []
+                     if a.get("user_id") and not a.get("is_bot")]
+            user = event.get("user") or (users[0] if users else "")
+            channels = common.context_channels(event)
+            if user:
+                self.viewing[user] = {"channel_ids": channels, "updated_at": int(time.time())}
+            log.info("context changed user=%s channels=%s", user or "?", channels)
+        elif etype == "agent_session_stopped":
+            channel, thread_ts = event.get("channel"), event.get("thread_ts")
+            log.info("session stop requested channel=%s thread=%s by %s",
+                     channel, thread_ts, event.get("user"))
+            if self.dry_run or not channel or not thread_ts:
+                return
+            self.set_session_status(channel, thread_ts, "active")
+            msg = self.cfg.get("stop_message")
+            if msg:
+                self._safe(self.web.chat_postMessage, channel=channel, thread_ts=thread_ts, text=msg)
+            self.mark_stopped(channel, thread_ts)
+        elif etype == "agent_session_title_changed":
+            log.info("session renamed channel=%s thread=%s", event.get("channel"),
+                     event.get("thread_ts"))
+
+    def mark_stopped(self, channel: str, thread_ts: str, clear: bool = False) -> None:
+        """Remember (or forget) stopped sessions so reply.sh does not re-open them."""
+        path = self.home / "run" / "stopped_sessions.json"
+        try:
+            data = json.loads(path.read_text()) if path.exists() else {}
+        except Exception:
+            data = {}
+        key = f"{channel}:{thread_ts}"
+        if clear:
+            if key not in data:
+                return
+            data.pop(key)
+        else:
+            data[key] = int(time.time())
+        cutoff = time.time() - 86400
+        data = {k: v for k, v in data.items() if v >= cutoff}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
 
     def user_info(self, user: str) -> dict:
         if not user or self.web is None:

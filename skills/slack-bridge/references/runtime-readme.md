@@ -48,6 +48,8 @@ Each Slack message arrives at the webhook as one JSON payload:
   "ts": "1712345678.000100", "thread_ts": null, "files": [],
   "reply": {"channel": "D0…", "thread_ts": null,
             "command": "@HOME@/scripts/reply.sh --channel D0… --ack-ts 1712… <<'EOF'\n<your reply>\nEOF"},
+  "agent_session": null,
+  "viewing_context": null,
   "raw_event": { … }
 }
 ```
@@ -79,7 +81,20 @@ EOF
      add `--done-reaction white_check_mark` to mark it done.
    - Long replies are split automatically. `--format mrkdwn|plain` changes rendering.
    - Prints `{"ok": true, "ts": [...]}` on success; non-zero exit on failure.
-5. Other helpers: `slackctl.sh react --channel C --ts T --name thumbsup [--remove]`,
+5. **Agent sessions** (Slack app with the agent view): `agent_session` is
+   `{"channel", "thread_ts", "status": "processing"}` and the user sees
+   "Working…" with a Stop button. Replies go in that thread, and
+   `reply.command` ends with `--session-status active`, which clears it.
+   - Interim acknowledgement during long work: same command but
+     `--session-status processing`; send the final answer with `active`.
+   - Waiting for the user's answer: `--session-status suspended`.
+   - Change status/title directly:
+     `@HOME@/scripts/slackctl.sh session --channel D… --thread-ts T --status active [--title "…"]`.
+   - `viewing_context.channel_ids`: the channel the user has open next to
+     the bot (from `app_context_changed`), for "summarise this channel".
+   - When `agent_session` is `null` the app has no agent view (or
+     `agent_sessions` is off): 👀 + `--ack-ts` behaviour as above.
+6. Other helpers: `slackctl.sh react --channel C --ts T --name thumbsup [--remove]`,
    `slackctl.sh whoami`.
 
 ## Operating the bridge
@@ -115,6 +130,9 @@ changes are picked up live; env changes need `restart.sh` (or
 | `forward_raw_event` | `true` | include the raw Slack event in payloads |
 | `log_message_text` | `false` | log message text (off for privacy) |
 | `webhook_timeout_seconds` / `webhook_retries` | `20` / `3` | webhook delivery |
+| `agent_sessions` | `true` | use Slack agent sessions ("Working…" + Stop, thread per conversation) when the app allows it |
+| `session_title_chars` | `60` | max length of automatic session titles |
+| `stop_message` | `Stopped.` | posted in the thread when the user presses Stop (empty = silent) |
 | `workspace`, `workspace_url`, `team_id`, `bot_user_id` | auto | filled from `auth.test` |
 
 See `references/reconnect.md` for switching agents/accounts and rotating
@@ -122,4 +140,5 @@ tokens, and `references/setup-slack-app.md` for creating the Slack app.
 
 Restart/recovery runbook: `docs/operations.md` in the source repository.
 See `docs/slack-connection-options.md` in the source repository for other
-ways to connect Slack (MCP connector, Composio, Cursor channel listener).
+ways to connect Slack (MCP connector, Composio, Cursor channel listener),
+and `docs/agent-view.md` for Slack's agent features.

@@ -10,10 +10,20 @@ features:
   bot_user:
     display_name: Grok Bot
     always_online: true
+  agent_view:
+    agent_description: Chat with your Grok Bot assistant from Slack.
+    suggested_prompts:
+      - title: "What can you do?"
+        message: "What can you help me with here in Slack?"
+      - title: Summarize this channel
+        message: Summarize the recent discussion in the channel I'm looking at.
+      - title: Draft a reply
+        message: Help me draft a reply to the latest message.
 oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - assistant:write
       - channels:history
       - chat:write
       - groups:history
@@ -28,6 +38,9 @@ settings:
     bot_events:
       - app_mention
       - message.im
+      - app_context_changed
+      - agent_session_stopped
+      - agent_session_title_changed
   interactivity:
     is_enabled: false
   org_deploy_enabled: false

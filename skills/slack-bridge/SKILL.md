@@ -13,7 +13,7 @@ the user specifies; the reference install is `/workspace/slack-bot`.
 ## How it fits together
 
 Slack app (Socket Mode, created from `manifest/`) → `scripts/bridge.py`
-(long-running, acks, filters, dedupes, 👀) → `POST GROK_WEBHOOK_URL` with
+(long-running, acks, filters, dedupes, marks "Working…" or 👀) → `POST GROK_WEBHOOK_URL` with
 `Authorization: GROK_WEBHOOK_AUTH` → agent routine → `scripts/reply.sh`
 posts the answer as the bot.
 
@@ -32,9 +32,9 @@ start.sh | stop.sh | restart.sh | status.sh  manage the background bridge (nohup
 ensure-running.sh [--dry-run] [--quiet]      no-op if healthy; start/restart if stopped, hung or disconnected
 doctor.sh [--ping-webhook] [--json]          validate env, tokens (auth.test, apps.connections.open), webhook, process
 reconfigure.sh [--ping-webhook] [--agent-label L] [--owner U…]   doctor, then restart only if all checks pass
-reply.sh --channel C [--thread-ts T] [--ack-ts T] <<'EOF' … EOF    reply as the bot (Markdown)
+reply.sh --channel C [--thread-ts T] [--ack-ts T] [--session-status S] <<'EOF' … EOF    reply as the bot (Markdown)
 set-owner.sh U…                              record the owner's member ID (drives is_owner)
-slackctl.sh thread|react|whoami|config|render-manifest …
+slackctl.sh thread|react|session|whoami|config|render-manifest …
 ```
 
 ## Answering a forwarded message
@@ -45,6 +45,12 @@ slackctl.sh thread|react|whoami|config|render-manifest …
 3. Fetch context when needed: `slackctl.sh thread --channel C --ts T`.
 4. Run `reply.command` from the payload with the answer as the heredoc body.
    Check for `"ok": true`; on failure run `doctor.sh` and report.
+5. Agent sessions: when `agent_session` is set, the user sees "Working…"
+   until a reply ends it. `reply.command` already ends it
+   (`--session-status active`); for an interim acknowledgement during long
+   work use `--session-status processing`, and `suspended` when waiting on
+   the user. `viewing_context.channel_ids` is the channel the user has open
+   next to the bot. See [docs/agent-view.md](../../docs/agent-view.md).
 
 ## Setup and reconnection
 

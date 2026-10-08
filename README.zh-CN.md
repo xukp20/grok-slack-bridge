@@ -106,7 +106,7 @@ Slack 应用和 Token 保持不变，只重新提供发生变化的部分：
 
 **推荐组合：** Grok Bot（本仓库）负责在 Slack 里收发聊天；Grok 的 Slack 连接器（以你身份授权的 "Grok" 应用）建议保留，它让 Agent 能搜索、阅读你看得到的频道和历史消息，并在你确认后以你的名义起草或发送消息，Bot 本身只能看到发给它的消息。Cursor Slack 应用只用于旧的频道监听，现在可以卸载。
 
-[docs/assistant-view.md](docs/assistant-view.md)（英文）介绍 Slack 的 "Agents & AI Apps" assistant 视图：在任意频道旁打开的侧边对话面板、每次对话独立成线程、推荐提问、"正在思考" 状态，以及开启它需要改的 manifest 和转发程序。
+[docs/agent-view.md](docs/agent-view.md)（英文）介绍 Slack 的 Agent 功能，转发程序已支持、manifest 已默认开启：在任意频道旁打开的分屏面板、每次对话独立成一个线程、处理时显示"Working…"并带停止按钮、自动设置对话标题、推荐提问，以及告诉 Agent 你正在看哪个频道。如果 Slack 应用还没开启 Agent 功能，转发程序会自动退回普通私信加 👀 的方式。
 
 ## 发布
 

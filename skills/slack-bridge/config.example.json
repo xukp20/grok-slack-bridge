@@ -15,5 +15,8 @@
   "forward_raw_event": true,
   "log_message_text": false,
   "webhook_timeout_seconds": 20,
-  "webhook_retries": 3
+  "webhook_retries": 3,
+  "agent_sessions": true,
+  "session_title_chars": 60,
+  "stop_message": "Stopped."
 }

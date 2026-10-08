@@ -103,6 +103,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "log_message_text": False,
     "webhook_timeout_seconds": 20,
     "webhook_retries": 3,
+    # Slack agent features (manifest `features.agent_view` + `assistant:write`).
+    # When on, each conversation becomes an agent session thread with a
+    # "Working..." status instead of the receipt reaction. Falls back to the
+    # plain behaviour automatically if Slack rejects the session call.
+    "agent_sessions": True,
+    "session_title_chars": 60,
+    "stop_message": "Stopped.",
 }
 
 ACCESS_MODES = ("everyone", "owner_only")
@@ -176,6 +183,9 @@ def coerce_config_value(key: str, raw: str) -> Any:
 # Event filtering and payload building
 # ---------------------------------------------------------------------------
 
+# Agent (agent_view) events the bridge handles itself instead of forwarding.
+AGENT_EVENTS = {"app_context_changed", "agent_session_stopped", "agent_session_title_changed"}
+
 # Message subtypes that still represent a human writing to the bot.
 ALLOWED_SUBTYPES = {None, "", "file_share", "thread_broadcast"}
 
@@ -242,23 +252,62 @@ def reply_target(event: dict[str, Any], dm_reply_in_thread: bool = False) -> dic
     return {"channel": channel, "thread_ts": thread_ts}
 
 
+def session_thread_ts(event: dict[str, Any]) -> str:
+    """Root ts of the agent session thread for a message: its thread or itself."""
+    return event.get("thread_ts") or event.get("ts") or ""
+
+
+def session_title(text: str, limit: int = 60) -> str:
+    """Short one-line session title from the first message text."""
+    text = re.sub(r"<@[A-Z0-9]+(\|[^>]*)?>", "", text or "")
+    text = re.sub(r"<(https?://[^|>]+)\|([^>]+)>", r"\2", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    limit = max(10, min(int(limit or 60), 200))
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def context_channels(event: dict[str, Any]) -> list[str]:
+    """Channel ids from an app_context_changed event, most relevant first."""
+    entities = ((event.get("context") or {}).get("entities")) or []
+    return [e.get("value") for e in entities
+            if isinstance(e, dict) and e.get("type") == "slack#/types/channel_id" and e.get("value")]
+
+
 def shell_quote(value: str) -> str:
     return shlex.quote(str(value))
 
 
 def build_payload(envelope: dict[str, Any], cfg: dict[str, Any], home: Path,
-                  user_info: dict[str, Any] | None = None) -> dict[str, Any]:
+                  user_info: dict[str, Any] | None = None,
+                  session: dict[str, Any] | None = None,
+                  viewing: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Webhook payload for one message.
+
+    session: {"channel", "thread_ts", "status"} when the bridge opened/updated an
+    agent session for this message (replies then go in that thread and the
+    reply command ends the session's "processing" state). None otherwise.
+    viewing: {"channel_ids": [...], "updated_at": int} last app_context_changed
+    for this user (what they were looking at in Slack), if known.
+    """
     event = envelope.get("event") or {}
     bot_user_id = cfg.get("bot_user_id", "")
-    target = reply_target(event, bool(cfg.get("dm_reply_in_thread")))
+    if session:
+        target = {"channel": session.get("channel") or event.get("channel"),
+                  "thread_ts": session.get("thread_ts")}
+    else:
+        target = reply_target(event, bool(cfg.get("dm_reply_in_thread")))
     user = event.get("user", "")
     owner = cfg.get("owner_user_id") or ""
     is_dm = event.get("channel_type") == "im"
     reply_cmd = [str(home / "scripts" / "reply.sh"), "--channel", target["channel"] or ""]
     if target["thread_ts"]:
         reply_cmd += ["--thread-ts", target["thread_ts"]]
-    if cfg.get("react_on_receipt") and cfg.get("ack_reaction"):
+    if cfg.get("react_on_receipt") and cfg.get("ack_reaction") and not session:
         reply_cmd += ["--ack-ts", event.get("ts", "")]
+    if session:
+        reply_cmd += ["--session-status", "active"]
     payload: dict[str, Any] = {
         "source": "slack-bridge",
         "version": 1,
@@ -288,6 +337,9 @@ def build_payload(envelope: dict[str, Any], cfg: dict[str, Any], home: Path,
             "command": " ".join(shell_quote(p) for p in reply_cmd) + " <<'EOF'\n<your reply>\nEOF",
             "readme": str(home / "README.md"),
         },
+        "agent_session": ({"channel": target["channel"], "thread_ts": target["thread_ts"],
+                           "status": session.get("status", "processing")} if session else None),
+        "viewing_context": viewing or None,
     }
     if cfg.get("forward_raw_event", True):
         payload["raw_event"] = event

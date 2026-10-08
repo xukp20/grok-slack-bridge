@@ -38,6 +38,16 @@ BOT_SCOPES = [
     "users:read",
 ]
 BOT_EVENTS = ["app_mention", "message.im"]
+# Slack agent features ("Agents" in app settings / manifest features.agent_view).
+AGENT_SCOPES = ["assistant:write"]
+AGENT_EVENTS = ["app_context_changed", "agent_session_stopped", "agent_session_title_changed"]
+DEFAULT_PROMPTS = [
+    {"title": "What can you do?", "message": "What can you help me with here in Slack?"},
+    {"title": "Summarize this channel",
+     "message": "Summarize the recent discussion in the channel I'm looking at."},
+    {"title": "Draft a reply", "message": "Help me draft a reply to the latest message."},
+]
+SESSION_STATUSES = ("processing", "active", "suspended", "closed")
 
 
 # ---------------------------------------------------------------------------
@@ -83,8 +93,9 @@ def read_text(args) -> str:
 # ---------------------------------------------------------------------------
 
 def build_manifest(name: str, description: str, color: str = "#111827",
-                   display_name: str | None = None) -> dict:
-    return {
+                   display_name: str | None = None, agent_view: bool = True,
+                   prompts: list[dict] | None = None) -> dict:
+    manifest = {
         "display_information": {
             "name": name,
             "description": description,
@@ -110,6 +121,14 @@ def build_manifest(name: str, description: str, color: str = "#111827",
             "token_rotation_enabled": False,
         },
     }
+    if agent_view:
+        manifest["features"]["agent_view"] = {
+            "agent_description": description[:300],
+            "suggested_prompts": list(DEFAULT_PROMPTS if prompts is None else prompts)[:4],
+        }
+        manifest["oauth_config"]["scopes"]["bot"] = sorted(BOT_SCOPES + AGENT_SCOPES)
+        manifest["settings"]["event_subscriptions"]["bot_events"] = BOT_EVENTS + AGENT_EVENTS
+    return manifest
 
 
 def _yaml_scalar(value) -> str:
@@ -136,12 +155,35 @@ def to_yaml(data, indent: int = 0) -> str:
                 lines.append(f"{pad}{key}: {_yaml_scalar(value)}")
     elif isinstance(data, list):
         for item in data:
-            lines.append(f"{pad}- {_yaml_scalar(item)}")
+            if isinstance(item, dict) and item:
+                first = True
+                for key, value in item.items():
+                    lead = "- " if first else "  "
+                    lines.append(f"{pad}{lead}{key}: {_yaml_scalar(value)}")
+                    first = False
+            else:
+                lines.append(f"{pad}- {_yaml_scalar(item)}")
     return "\n".join(lines)
 
 
+def parse_prompts(values: list[str] | None) -> list[dict] | None:
+    if not values:
+        return None
+    prompts = []
+    for v in values:
+        title, sep, message = v.partition("|")
+        if not sep or not title.strip() or not message.strip():
+            die(f"--prompt expects 'Title|Message', got {v!r}")
+        prompts.append({"title": title.strip(), "message": message.strip()})
+    if len(prompts) > 4:
+        die("Slack allows at most 4 suggested prompts")
+    return prompts
+
+
 def cmd_render_manifest(args) -> int:
-    manifest = build_manifest(args.name, args.description, args.color, args.display_name)
+    manifest = build_manifest(args.name, args.description, args.color, args.display_name,
+                              agent_view=not args.no_agent_view,
+                              prompts=parse_prompts(args.prompt))
     if args.format == "json":
         text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
     else:
@@ -184,6 +226,39 @@ def post_reply(client, channel: str, text: str, thread_ts: str | None, fmt: str)
     return sent
 
 
+def api_json(client, method: str, body: dict) -> dict:
+    try:
+        return dict(client.api_call(method, json=body).data)
+    except Exception as exc:
+        data = getattr(getattr(exc, "response", None), "data", None)
+        return dict(data) if isinstance(data, dict) else {"ok": False, "error": str(exc)}
+
+
+def recently_stopped(home: Path, channel: str, thread_ts: str, window: int = 3600) -> bool:
+    try:
+        data = json.loads((home / "run" / "stopped_sessions.json").read_text())
+    except Exception:
+        return False
+    at = data.get(f"{channel}:{thread_ts}")
+    return bool(at) and time.time() - float(at) < window
+
+
+def set_session(client, home: Path, channel: str, thread_ts: str | None, status: str) -> dict | None:
+    """Set an agent session status; quietly no-op when there is no session."""
+    if not status or status == "none" or not thread_ts:
+        return None
+    if status == "processing" and recently_stopped(home, channel, thread_ts):
+        print("slackctl: note: the user pressed Stop in this thread; leaving it active",
+              file=sys.stderr)
+        status = "active"
+    resp = api_json(client, "agents.sessions.setStatus",
+                    {"channel_id": channel, "thread_ts": thread_ts, "status": status})
+    if not resp.get("ok"):
+        print(f"slackctl: note: agents.sessions.setStatus({status}) failed: {resp.get('error')}",
+              file=sys.stderr)
+    return resp
+
+
 def cmd_reply(args) -> int:
     text = read_text(args).strip()
     if not text:
@@ -192,7 +267,12 @@ def cmd_reply(args) -> int:
     try:
         sent = post_reply(client, args.channel, text, args.thread_ts, args.format)
     except Exception as exc:
+        if args.session_status and args.session_status != "none":
+            set_session(client, common.resolve_home(args.home), args.channel,
+                        args.thread_ts, "active")
         die(f"chat.postMessage failed: {slack_error(exc)}", 1)
+    session = set_session(client, common.resolve_home(args.home), args.channel,
+                          args.thread_ts, args.session_status or "none")
     if args.ack_ts:
         cfg = common.load_config(common.resolve_home(args.home))
         name = args.ack_reaction or cfg.get("ack_reaction") or "eyes"
@@ -208,8 +288,34 @@ def cmd_reply(args) -> int:
                                      name=args.done_reaction.strip(":"))
             except Exception:
                 pass
-    print(json.dumps({"ok": True, "channel": args.channel, "thread_ts": args.thread_ts,
-                      "ts": sent}))
+    out = {"ok": True, "channel": args.channel, "thread_ts": args.thread_ts, "ts": sent}
+    if session is not None:
+        out["session_status"] = session.get("agent_status") or session.get("status") \
+            if session.get("ok") else f"error: {session.get('error')}"
+    print(json.dumps(out))
+    return 0
+
+
+def cmd_session(args) -> int:
+    client = web_client()
+    home = common.resolve_home(args.home)
+    if args.title and not args.status:
+        resp = api_json(client, "agents.sessions.rename",
+                        {"channel_id": args.channel, "thread_ts": args.thread_ts,
+                         "title": args.title[:200]})
+    else:
+        if args.status == "processing" and recently_stopped(home, args.channel, args.thread_ts):
+            die("the user pressed Stop in this thread; not re-opening it", 1)
+        body = {"channel_id": args.channel, "thread_ts": args.thread_ts,
+                "status": args.status or "active"}
+        resp = api_json(client, "agents.sessions.setStatus", body)
+        if resp.get("ok") and args.title:
+            resp = api_json(client, "agents.sessions.rename",
+                            {"channel_id": args.channel, "thread_ts": args.thread_ts,
+                             "title": args.title[:200]})
+    if not resp.get("ok"):
+        die(f"session call failed: {resp.get('error')}", 1)
+    print(json.dumps({k: resp.get(k) for k in ("ok", "status", "agent_status") if k in resp}))
     return 0
 
 
@@ -473,6 +579,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ack-reaction", help="reaction name to remove (default: config ack_reaction)")
     r.add_argument("--done-reaction", help="optional reaction to add to --ack-ts after replying")
     r.add_argument("--format", choices=("markdown", "mrkdwn", "plain"), default="markdown")
+    r.add_argument("--session-status", choices=SESSION_STATUSES + ("none",),
+                   help="after posting, set the thread's agent session status: active (done, "
+                        "the default in payload commands), processing (an interim 'working on "
+                        "it' message), suspended (waiting for the user), closed, or none")
     g = r.add_mutually_exclusive_group()
     g.add_argument("--text")
     g.add_argument("--text-file")
@@ -490,6 +600,13 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--ts")
     t.add_argument("--limit", type=int, default=30)
     t.set_defaults(func=cmd_thread)
+
+    se = sub.add_parser("session", help="set an agent session's status and/or title")
+    se.add_argument("--channel", required=True)
+    se.add_argument("--thread-ts", required=True)
+    se.add_argument("--status", choices=SESSION_STATUSES)
+    se.add_argument("--title")
+    se.set_defaults(func=cmd_session)
 
     sub.add_parser("whoami", help="auth.test for the bot token").set_defaults(func=cmd_whoami)
 
@@ -514,6 +631,10 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--display-name")
     m.add_argument("--description", default="Chat with your Grok Bot assistant from Slack.")
     m.add_argument("--color", default="#111827")
+    m.add_argument("--prompt", action="append", metavar="'Title|Message'",
+                   help="suggested prompt shown in the agent view (repeat, max 4)")
+    m.add_argument("--no-agent-view", action="store_true",
+                   help="plain bot app without Slack's agent features")
     m.add_argument("--format", choices=("yaml", "json"), default="yaml")
     m.add_argument("--out")
     m.set_defaults(func=cmd_render_manifest)

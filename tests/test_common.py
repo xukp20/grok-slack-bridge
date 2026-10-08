@@ -141,6 +141,52 @@ class TextTests(unittest.TestCase):
         self.assertIn("**raw**", out)
 
 
+class AgentSessionTests(unittest.TestCase):
+    CFG = {**common.DEFAULT_CONFIG, "bot_user_id": "UBOT", "owner_user_id": "UOWN"}
+
+    def envelope(self, **event):
+        base = {"type": "message", "channel_type": "im", "channel": "D1", "user": "UOWN",
+                "text": "hello", "ts": "100.1"}
+        base.update(event)
+        return {"event_id": "Ev1", "team_id": "T1", "event": base}
+
+    def test_session_thread_and_title(self):
+        self.assertEqual(common.session_thread_ts({"ts": "1.0"}), "1.0")
+        self.assertEqual(common.session_thread_ts({"ts": "2.0", "thread_ts": "1.0"}), "1.0")
+        self.assertEqual(common.session_title("<@UBOT>  hi\n<https://x.io|link> there"),
+                         "hi link there")
+        self.assertTrue(common.session_title("x" * 300, 20).endswith("…"))
+        self.assertEqual(len(common.session_title("x" * 300, 20)), 20)
+
+    def test_context_channels(self):
+        ev = {"context": {"entities": [{"type": "slack#/types/channel_id", "value": "C9"},
+                                       {"type": "other", "value": "z"}]}}
+        self.assertEqual(common.context_channels(ev), ["C9"])
+        self.assertEqual(common.context_channels({"context": {}}), [])
+
+    def test_payload_with_session_threads_dm_and_ends_session(self):
+        env = self.envelope()
+        sess = {"channel": "D1", "thread_ts": "100.1", "status": "processing"}
+        p = common.build_payload(env, self.CFG, Path("/h"), session=sess,
+                                 viewing={"channel_ids": ["C9"], "updated_at": 1})
+        self.assertEqual(p["reply"]["thread_ts"], "100.1")
+        self.assertIn("--session-status active", p["reply"]["command"])
+        self.assertNotIn("--ack-ts", p["reply"]["command"])
+        self.assertEqual(p["agent_session"]["thread_ts"], "100.1")
+        self.assertEqual(p["viewing_context"]["channel_ids"], ["C9"])
+
+    def test_payload_without_session_unchanged(self):
+        p = common.build_payload(self.envelope(), self.CFG, Path("/h"))
+        self.assertIsNone(p["reply"]["thread_ts"])
+        self.assertIsNone(p["agent_session"])
+        self.assertIn("--ack-ts", p["reply"]["command"])
+        self.assertNotIn("--session-status", p["reply"]["command"])
+
+    def test_agent_events_are_not_forwardable_messages(self):
+        for t in common.AGENT_EVENTS:
+            self.assertFalse(common.should_handle({"type": t, "user": "U1"})[0])
+
+
 class ManifestTests(unittest.TestCase):
     MDIR = ROOT / "skills/slack-bridge/manifest"
 
@@ -150,6 +196,14 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual((self.MDIR / "slack-app-manifest.yaml").read_text(), slackctl.to_yaml(m) + "\n")
         self.assertTrue(m["settings"]["socket_mode_enabled"])
         self.assertTrue(m["features"]["app_home"]["messages_tab_enabled"])
+        self.assertIn("assistant:write", m["oauth_config"]["scopes"]["bot"])
+        self.assertIn("agent_session_stopped", m["settings"]["event_subscriptions"]["bot_events"])
+        self.assertLessEqual(len(m["features"]["agent_view"]["suggested_prompts"]), 4)
+
+    def test_plain_manifest_has_no_agent_features(self):
+        m = slackctl.build_manifest("Grok Bot", "d", agent_view=False)
+        self.assertNotIn("agent_view", m["features"])
+        self.assertNotIn("assistant:write", m["oauth_config"]["scopes"]["bot"])
 
     def test_yaml_parses_when_pyyaml_available(self):
         try:
@@ -159,6 +213,8 @@ class ManifestTests(unittest.TestCase):
         for name in ("Grok Bot", "Bot: #1 'quoted'"):
             m = slackctl.build_manifest(name, "desc: with colon")
             self.assertEqual(yaml.safe_load(slackctl.to_yaml(m)), m)
+        m = slackctl.build_manifest("B", "d", prompts=[{"title": "总结: 频道", "message": "- 帮我总结"}])
+        self.assertEqual(yaml.safe_load(slackctl.to_yaml(m)), m)
 
 
 if __name__ == "__main__":

@@ -171,7 +171,12 @@ this bridge with the agent's built-in Slack MCP connector (read/search/draft
 as you, no inbound chat), Composio's Slack toolkit (own OAuth, outbound
 only), and the Cursor Slack app with a Slack-listener routine on a channel
 (inbound, but replies appear as the Cursor app and there are no DMs), and
-explains when each is the better fit.
+explains when each is the better fit. Its "Recommended combination" section
+explains why we keep the Grok Slack connector next to the bot.
+
+[docs/assistant-view.md](docs/assistant-view.md) explains Slack's "Agents & AI
+Apps" assistant view (side panel, per-chat threads, suggested prompts) and
+what enabling it involves.
 
 ## Operations
 
@@ -201,6 +206,7 @@ skills/slack-bridge/
   config.example.json      all config keys with defaults
 docs/
   slack-connection-options.md   alternatives we evaluated and why this design
+  assistant-view.md             Slack "Agents & AI Apps" side panel: what it does, how to enable
   operations.md                 restarts, crashes, failures, self-healing
   publishing.md                 gh device login and first push
 tests/                     unit tests (standard library only)

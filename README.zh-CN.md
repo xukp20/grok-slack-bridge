@@ -104,6 +104,10 @@ Slack 应用和 Token 保持不变，只重新提供发生变化的部分：
 选择独立 Socket Mode 应用，是因为它有自己的 Bot 身份、支持私信、实时送达、无需公网地址，
 并且换 Agent 或账号时只需重新指向 webhook。
 
+**推荐组合：** Grok Bot（本仓库）负责在 Slack 里收发聊天；Grok 的 Slack 连接器（以你身份授权的 "Grok" 应用）建议保留，它让 Agent 能搜索、阅读你看得到的频道和历史消息，并在你确认后以你的名义起草或发送消息，Bot 本身只能看到发给它的消息。Cursor Slack 应用只用于旧的频道监听，现在可以卸载。
+
+[docs/assistant-view.md](docs/assistant-view.md)（英文）介绍 Slack 的 "Agents & AI Apps" assistant 视图：在任意频道旁打开的侧边对话面板、每次对话独立成线程、推荐提问、"正在思考" 状态，以及开启它需要改的 manifest 和转发程序。
+
 ## 发布
 
 使用 GitHub CLI 设备登录（`gh auth login --web`），步骤见 [docs/publishing.md](docs/publishing.md)。

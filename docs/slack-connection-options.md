@@ -53,6 +53,19 @@ routine prompt restricts that.
 Use it for: a quick personal or small-team channel bot when branding and
 DMs do not matter.
 
+## Recommended combination (what we actually run)
+
+| Piece | Keep? | Why |
+| --- | --- | --- |
+| **Grok Bot app (this repo)** | Yes | Inbound chat: people DM or @mention the bot, the agent replies as the bot. |
+| **Grok Slack connector (route B, the "Grok" app authorised as you)** | Yes, recommended | The bot can only see messages sent *to it*. The connector is how the agent searches Slack, reads channels/threads/canvases you can see, builds digests, and (only after you confirm) drafts or sends messages **in your name**. Removing it does not break chat, it only removes those abilities. |
+| Cursor Slack app (route D) | Optional, can be uninstalled | It only served the old `#ask-bot` listener. Chat no longer goes through it; keep it only if you use other Cursor features in Slack. |
+| Composio Slack (route C) | Not needed | Leave unconnected unless you need an API action the connector lacks. |
+
+In short: **the bot is the agent's mouth and ears inside Slack; the Grok
+connector is its eyes on the rest of your Slack.** They do not overlap, so
+running both is the intended setup.
+
 ## Why the standalone Socket Mode app
 
 - **Its own identity**: a real bot user (*Grok Bot*) that people can DM from

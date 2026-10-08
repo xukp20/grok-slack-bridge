@@ -28,8 +28,7 @@ git ls-files | xargs grep -nE 'xox[abpr]-[0-9A-Za-z-]{10,}|xapp-[0-9]-[A-Z0-9]{8
 
 ## CI workflow
 
-The GitHub Actions test workflow is kept at `ci/github-actions-tests.yml`
-because the CLI token used for the first push lacked the `workflow` scope.
-To enable CI, run `gh auth refresh -s workflow`, then
-`mkdir -p .github/workflows && git mv ci/github-actions-tests.yml .github/workflows/tests.yml`
-and push.
+The GitHub Actions test workflow lives at `.github/workflows/tests.yml` and runs
+the unit tests on Python 3.10 and 3.12 on every push and pull request. Pushing
+changes to files under `.github/workflows/` needs a token with the `workflow`
+scope (`gh auth refresh -s workflow`).

@@ -45,7 +45,18 @@ posts the answer as the bot and closes the operation.
   `session_routing.channels` is posted to its own agent's webhook (env var
   **names** `webhook_url_env`/`webhook_auth_env`; unset → default webhook).
   `busy_policy` `interrupt_merge` (default) | `queue` is passed through for
-  the handling conversation; bridge busy-retry is unchanged.
+  the handling conversation; bridge busy-retry is unchanged. Give a channel
+  its own agent: [docs/dedicated-channel-bot.md](../../docs/dedicated-channel-bot.md)
+  (templates: `references/dedicated-agent-persona.md`,
+  `dedicated-routine-prompt.md`, `channel-memory-template.md`;
+  `scripts/add-channel-route.sh`).
+- **Top-level conversations dispatch, they don't block**: a handoff is
+  delivered only after the receiving conversation's current turn ends, and
+  a wait inside a turn is not interrupted. Keep turns short, hand long work
+  to a background task, never sleep/poll, check for newer messages in the
+  thread before the final reply:
+  [references/dispatcher-guideline.md](references/dispatcher-guideline.md)
+  ([why](../../docs/conversation-guidelines.md)).
 - **Monitoring**: `status.sh` separates process health from task state;
   restarts and repeated webhook failures go to `report_channel`.
 
@@ -75,6 +86,9 @@ slackctl.sh health|ops|threads               process health vs task state; resol
 slackctl.sh access check|validate            explain an access decision / lint the access config
 slackctl.sh migrate-config                   add missing access/routing keys (backup first)
 slackctl.sh routing [--channel C]            effective session route per channel (env names only)
+add-channel-route.sh --channel C --label L --url-env N --auth-env N [--busy-policy P] [--dry-run] [--restart]
+                                             back up config, route C to a dedicated agent (env NAMES only)
+add-channel-route.sh --remove --channel C    roll back to main (= slackctl.sh route add|remove)
 slackctl.sh upload|download                  files (files:write / files:read)
 slackctl.sh thread|react|session|whoami|config|render-manifest …
 ```
@@ -91,7 +105,9 @@ slackctl.sh thread|react|session|whoami|config|render-manifest …
    when a message arrives mid-task: `interrupt_merge` merges same-thread
    follow-ups into one answer (close merged ops with `--no-reply --reason
    "merged into Ev…"`), `queue` finishes first. Every operation gets exactly
-   one `reply.sh --op`.
+   one `reply.sh --op`. If you are the top-level conversation, follow
+   [dispatcher-guideline.md](references/dispatcher-guideline.md): answer quick
+   things, dispatch long work to a background task, never block the turn.
 2. Act on the owner's private data, accounts, files or approvals only when
    `is_owner` is true (`permissions` has `files`/`approve`/`admin`). Others,
    and every bot (`actor_type: "bot"`), get general help only and never the

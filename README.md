@@ -37,6 +37,8 @@
   &middot;
   <a href="docs/session-model.md">Session model</a>
   &middot;
+  <a href="docs/dedicated-channel-bot.md">Dedicated channel bot</a>
+  &middot;
   <a href="docs/slack-connection-options.md">Alternatives</a>
   &middot;
   <a href="skills/slack-bridge/SKILL.md">Skill Reference</a>
@@ -187,8 +189,41 @@ arrives mid-task: `interrupt_merge` (default; merge same-thread follow-ups
 and answer once) or `queue` (finish first, then in order). Every payload
 carries `routing = {target, busy_policy, source, label, webhook}`.
 Unconfigured channels, and dedicated routes whose env variables are
-missing, use the default webhook. Details, trade-offs and how to add a
-dedicated bot: [docs/session-model.md](docs/session-model.md).
+missing, use the default webhook. Details and trade-offs:
+[docs/session-model.md](docs/session-model.md).
+
+### A dedicated bot for one channel
+
+[docs/dedicated-channel-bot.md](docs/dedicated-channel-bot.md) walks through
+giving a channel its own agent, as done for a bot-to-bot `#my-bots` channel:
+create the agent from the
+[persona template](skills/slack-bridge/references/dedicated-agent-persona.md),
+give it a [channel memory file](skills/slack-bridge/references/channel-memory-template.md)
+and a webhook routine from the
+[dedicated routine prompt](skills/slack-bridge/references/dedicated-routine-prompt.md),
+have the owner put the routine's URL and Authorization into two secrets via
+masked input, then:
+
+```bash
+scripts/add-channel-route.sh --channel C0123456789 --label "release bot" \
+    --url-env GROK_WEBHOOK_URL_RELEASE --auth-env GROK_WEBHOOK_AUTH_RELEASE   # backs up config, no restart
+scripts/restart.sh && scripts/slackctl.sh routing --channel C0123456789
+scripts/add-channel-route.sh --remove --channel C0123456789                    # roll back (live)
+```
+
+It also covers how routing interacts with access, triggers and
+`busy_policy`, and a rollback checklist.
+
+### Top-level conversations dispatch, they don't block
+
+A Slack handoff reaches the main conversation only after its current turn
+ends, and a wait inside a turn is not interrupted by new messages. So the
+main conversation and every dedicated agent should plan and dispatch: answer
+quick things directly, hand long work to a background task, keep turns
+short, never sleep or poll, and check for newer unhandled messages in the
+thread before the final reply. Guide:
+[docs/conversation-guidelines.md](docs/conversation-guidelines.md); paste-in
+rules: [dispatcher-guideline.md](skills/slack-bridge/references/dispatcher-guideline.md).
 
 ## Access, Triggers, and Reliability
 
@@ -305,13 +340,16 @@ skills/slack-bridge/
   scripts/                 bridge.py (Socket Mode), access.py, events.py, store.py (SQLite state),
                            webhook.py, outbox.py, slackctl.py, common.py, *.sh helpers
   references/              configuration, config pitfalls, payload v2, setup, reconnect, runtime README template,
-                           inbox routine prompt (silent handoff)
+                           inbox routine prompt (silent handoff), dedicated agent persona + routine prompt,
+                           channel memory template, dispatcher guideline
   config.example.json      all config keys with defaults
 docs/
   slack-connection-options.md   alternatives we evaluated and why this design
   agent-view.md                 Slack agent features (split view, sessions, Stop, prompts) and how the bridge uses them
   operations.md                 restarts, crashes, failures, self-healing
   session-model.md              main-conversation handoff, dedicated per-channel bots, interrupt vs queue
+  dedicated-channel-bot.md      give one channel its own agent: steps, worked example, access interplay, rollback
+  conversation-guidelines.md    top-level conversations plan and dispatch; why they must not block
   publishing.md                 gh device login and first push
 tests/                     offline unit tests with fake Slack events and a fake webhook
 ```

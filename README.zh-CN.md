@@ -117,6 +117,33 @@ Slack 工作共用一份有序的上下文。某个频道也可以路由到一�
 未配置的频道、以及环境变量缺失的专属路由，都走默认 webhook。添加专属 Bot 需要先导出
 两个环境变量再 `restart.sh`。详见 [docs/session-model.md](docs/session-model.md)（英文）。
 
+### 给某个频道配专属 Bot
+
+[docs/dedicated-channel-bot.md](docs/dedicated-channel-bot.md)（英文）按步骤记录了怎样给一个频道
+单独配一个 Agent（例如机器人互聊的 `#my-bots`）：用
+[人设模板](skills/slack-bridge/references/dedicated-agent-persona.md)建 Agent，写一份
+[频道记忆文件](skills/slack-bridge/references/channel-memory-template.md)，用
+[专属例行任务提示词](skills/slack-bridge/references/dedicated-routine-prompt.md)建 webhook 例行任务；
+所有者从例行任务面板复制 webhook 地址和 Authorization，通过加密输入存成两个密钥（不要贴到聊天里），然后：
+
+```bash
+scripts/add-channel-route.sh --channel C0123456789 --label "发布频道 Bot" \
+    --url-env GROK_WEBHOOK_URL_RELEASE --auth-env GROK_WEBHOOK_AUTH_RELEASE   # 先备份配置，不会自动重启
+scripts/restart.sh && scripts/slackctl.sh routing --channel C0123456789
+scripts/add-channel-route.sh --remove --channel C0123456789                    # 回滚，立即生效
+```
+
+脚本只接受环境变量的**名字**，像 URL、Token、`Bearer …` 的值会被拒绝且不回显；只显示变量
+"已设置/缺失"。文档还说明了路由和访问控制、触发方式、`busy_policy` 的关系，以及移除/回滚清单。
+
+### 顶层对话只做规划和分派，不要阻塞
+
+Slack 消息转给主对话时，要等主对话**当前这一轮结束**才会送达；一轮里的等待（比如 `sleep 60`）
+不会被新消息打断。所以主对话和每个频道的专属 Agent 都应该：简单问题直接答，耗时的工作交给后台任务，
+每轮尽量短，不要 sleep 或轮询，发最终回复前先检查同一线程里有没有更新的未处理消息，再按 `busy_policy`
+合并。详见 [docs/conversation-guidelines.md](docs/conversation-guidelines.md)（英文），可直接粘贴的规则见
+[dispatcher-guideline.md](skills/slack-bridge/references/dispatcher-guideline.md)（英文）。
+
 ## 访问控制、触发方式与可靠性
 
 默认配置很保守：只服务所有者，只响应私信和 @提及，不接受任何 Bot 的消息。

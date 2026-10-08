@@ -111,23 +111,43 @@ starting.)
 
 ## Adding a dedicated per-channel bot
 
-1. Create the dedicated Grok Bot agent and its webhook routine; get its
-   URL and `Authorization` value.
-2. Choose two env names that are not the default ones, e.g.
-   `GROK_WEBHOOK_URL_RELEASE` / `GROK_WEBHOOK_AUTH_RELEASE`, and add the
-   channel entry above to `config.json` (`slackctl.sh config set
-   session_routing '<json>'`, or edit the file).
-3. Export both variables in the shell that starts the bridge, then
-   `scripts/restart.sh` (the bridge reads secrets only at start and removes
-   them from its environment). Config changes alone are picked up live, but
-   a new env variable needs the restart.
+Full guide with reusable templates (agent persona, routine prompt, channel
+memory file), the access/`busy_policy` interplay, a worked example (#my-bots)
+and a removal/rollback checklist: [dedicated-channel-bot.md](dedicated-channel-bot.md).
+In short:
+
+1. Create the dedicated agent, its channel memory file and its webhook
+   routine; the owner puts the routine's URL and `Authorization` value into
+   two secrets (masked input, never chat), e.g. `GROK_WEBHOOK_URL_RELEASE` /
+   `GROK_WEBHOOK_AUTH_RELEASE`.
+2. `scripts/add-channel-route.sh --channel C0123456789 --label "release bot"
+   --url-env GROK_WEBHOOK_URL_RELEASE --auth-env GROK_WEBHOOK_AUTH_RELEASE`
+   (backs up `config.json`, refuses secret-looking values, checks the
+   variables without printing them; same as `slackctl.sh route add`).
+3. `scripts/restart.sh` (the bridge reads secrets only at start and removes
+   them from its environment; config-only changes are picked up live), or
+   pass `--restart` to the helper.
 4. Check: `slackctl.sh routing --channel C0123456789` (effective route, env
    names only), `scripts/doctor.sh` (env present + TLS reachability of the
    dedicated host, no request sent), `status.sh` / `run/heartbeat.json`
-   (`dedicated_routes` lists the channel and webhook host).
+   (`dedicated_routes` lists the channel and webhook host), then a real
+   @mention.
 5. If the variables are missing at start, the bridge logs a warning and
    delivers that channel to the default webhook with
    `routing.fallback` set — messages are never dropped because of routing.
 
-To remove a dedicated route, delete the channel entry; the channel goes back
-to the main conversation immediately.
+To remove a dedicated route: `scripts/add-channel-route.sh --remove
+--channel C0123456789` (or delete the entry); the channel goes back to the
+main conversation immediately.
+
+## Top-level conversations plan and dispatch
+
+A handoff reaches the main conversation only **after its current turn
+ends**, and a blocking wait inside a turn is not interrupted by new
+messages. So the main conversation (and each dedicated agent) should keep
+turns short: answer quick things directly, hand long work to a background
+task, never sleep or poll, and check for newer unhandled messages in the
+same thread before the final reply so `busy_policy` can merge them. Rules
+and examples: [conversation-guidelines.md](conversation-guidelines.md);
+pasteable block:
+[references/dispatcher-guideline.md](../skills/slack-bridge/references/dispatcher-guideline.md).

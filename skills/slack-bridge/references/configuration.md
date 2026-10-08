@@ -167,7 +167,12 @@ Unconfigured channels always use `GROK_WEBHOOK_URL`/`GROK_WEBHOOK_AUTH`. A
 dedicated route whose variables were not set when the bridge started falls
 back to the default webhook (warning in the log and `doctor.sh`,
 `routing.fallback` in the payload). Inspect with `slackctl.sh routing
-[--channel C…]`.
+[--channel C…]`. Add or remove one channel's entry without retyping the
+whole object (backup, secret-value refusal, env presence check):
+`scripts/add-channel-route.sh` / `slackctl.sh route add|remove`; step by
+step in [`docs/dedicated-channel-bot.md`](../../../docs/dedicated-channel-bot.md).
+Note that `slackctl.sh config set session_routing '<json>'` replaces the
+whole object.
 
 ## Presentation and privacy
 

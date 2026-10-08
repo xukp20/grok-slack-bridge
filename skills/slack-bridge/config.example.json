@@ -1,0 +1,19 @@
+{
+  "bot_name": "Grok Bot",
+  "agent_label": "",
+  "workspace": "",
+  "workspace_url": "",
+  "team_id": "",
+  "bot_user_id": "",
+  "owner_user_id": "",
+  "access": "everyone",
+  "deny_message": "Sorry, I only take requests from my owner here.",
+  "react_on_receipt": true,
+  "ack_reaction": "eyes",
+  "error_reaction": "warning",
+  "dm_reply_in_thread": false,
+  "forward_raw_event": true,
+  "log_message_text": false,
+  "webhook_timeout_seconds": 20,
+  "webhook_retries": 3
+}

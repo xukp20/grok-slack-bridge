@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+*.log
+*.log.*
+logs/
+run/
+*.pid
+config.json
+!config.example.json
+.DS_Store

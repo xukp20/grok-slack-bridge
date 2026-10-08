@@ -1,0 +1,2 @@
+# Runtime dependency of the bridge; install.sh installs it into <install>/.venv.
+-r skills/slack-bridge/requirements.txt

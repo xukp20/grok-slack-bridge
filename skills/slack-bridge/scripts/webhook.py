@@ -3,10 +3,15 @@
 Outcomes:
   accepted  2xx response
   retry     the request was definitely not processed (connect/DNS/TLS error,
-            failure while sending, 429, 502, 503) -> safe to queue again
-  unknown   the request may have been processed (timeout or disconnect while
-            waiting for the response, 500, 504) -> never resent automatically
-  rejected  the endpoint refused it (401/403/404/410 and other 4xx)
+            failure while sending) -> safe to queue again
+  busy      the endpoint answered but did not take the run now (400, 408, 409,
+            425, 429, any 5xx). Typical cause: a Grok routine still busy with
+            the previous message rejects an overlapping run. Queued again with
+            a slow backoff (webhook_busy_*), in thread order.
+  unknown   no answer after the request was sent (timeout, disconnect while
+            waiting) -> the agent may be running it; never resent automatically
+  rejected  the endpoint refused it for good: 401/403 (stale Authorization),
+            404/410 (stale URL), other 4xx
 """
 
 from __future__ import annotations
@@ -18,8 +23,9 @@ import ssl
 import urllib.parse
 from dataclasses import dataclass
 
-RETRY_STATUSES = {429, 502, 503}
-UNKNOWN_STATUSES = {500, 504}
+BUSY_STATUSES = {400, 408, 409, 425, 429}
+CREDENTIAL_STATUSES = {401, 403}
+STALE_URL_STATUSES = {404, 410}
 
 
 @dataclass
@@ -70,8 +76,17 @@ def post_json(url: str, auth: str, payload: dict, timeout: float = 20.0,
     status = resp.status
     if 200 <= status < 300:
         return Result("accepted", status)
-    if status in RETRY_STATUSES:
-        return Result("retry", status, f"HTTP {status}")
-    if status in UNKNOWN_STATUSES or status >= 500:
-        return Result("unknown", status, f"HTTP {status}")
+    return classify_status(status)
+
+
+def classify_status(status: int) -> Result:
+    """Outcome for an HTTP response status (the response did arrive)."""
+    if 200 <= status < 300:
+        return Result("accepted", status)
+    if status in BUSY_STATUSES or status >= 500:
+        return Result("busy", status, f"HTTP {status}")
+    if status in CREDENTIAL_STATUSES:
+        return Result("rejected", status, f"HTTP {status} (Authorization rejected)")
+    if status in STALE_URL_STATUSES:
+        return Result("rejected", status, f"HTTP {status} (webhook URL not found)")
     return Result("rejected", status, f"HTTP {status}")

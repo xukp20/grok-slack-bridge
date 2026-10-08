@@ -83,9 +83,10 @@ bridge.
 | Webhook result | Operation state | Resent? |
 | --- | --- | --- |
 | 2xx | `accepted` | — |
-| connect/TLS failure before sending, 429, 502, 503 | `queued` with 1s/3s/9s backoff, then `failed` | yes, up to `webhook_retries` |
-| timeout or disconnect after sending, 500, 504, other 5xx | `unknown-result` | **no** — the agent may have it; resolve with `slackctl.sh ops resolve` or `ops retry --force` |
-| other 4xx (401/403/404/410: stale URL or key) | `failed` | no; `error_reaction` + fixed `error_text` to the requester |
+| connect/DNS/TLS failure (request never sent) | `queued`, 1s/3s/9s backoff, then `failed` | yes, up to `webhook_retries` |
+| 400, 408, 409, 425, 429, any 5xx ("busy": usually the routine is still running the previous message, since every Slack message starts its own run) | `queued`; retried after 20s, 40s, 80s, 160s, then every 5 min, up to 15 min (`webhook_busy_*`), in thread order; "排队中…" / ⏳ meanwhile | yes; when exhausted: `failed` + `busy_failed_text` asking the user to resend |
+| timeout or disconnect after sending | `unknown-result` | **no**: the agent may have it; resolve with `slackctl.sh ops resolve` or `ops retry --force` |
+| 401/403 (stale Authorization), 404/410 (stale URL), other 4xx | `failed` | no; `error_reaction` + fixed `error_text` to the requester |
 
 After a restart, operations that were `submitted` or `accepted` become
 `needs-reconciliation` and are never replayed; `reply.sh --op` still

@@ -147,7 +147,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "forward_raw_event": True,
     "log_message_text": False,
     "webhook_timeout_seconds": 20,
-    "webhook_retries": 3,
+    "webhook_retries": 3,               # connect/TLS failures (request never sent)
+    # The routine answered 400/408/409/425/429/5xx: usually busy with the previous
+    # message (each Slack message starts its own routine run). Retry slowly, in order.
+    "webhook_busy_retry_delays": [20, 40, 80, 160],
+    "webhook_busy_retry_interval_seconds": 300,
+    "webhook_busy_max_seconds": 900,
+    "queued_status_text": "排队中…",
+    "queued_reaction": "hourglass_flowing_sand",
+    "busy_failed_text": "抱歉，这条消息一直没能送达（我这边一直在忙），请稍后重新发送一次。",
     # Slack agent features (manifest `features.agent_view` + `assistant:write`).
     # When on, each conversation becomes an agent session thread with a
     # "Working..." status instead of the receipt reaction. Falls back to the

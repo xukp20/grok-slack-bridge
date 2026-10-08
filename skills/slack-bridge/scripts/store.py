@@ -248,11 +248,28 @@ class Store:
         return result
 
     def next_queued(self) -> dict | None:
+        """Oldest due queued operation that is not behind an earlier one.
+
+        Order is kept per thread (and per DM channel, where top-level
+        messages are one conversation): while an earlier operation of the same
+        conversation is still queued (e.g. waiting out a busy webhook) or
+        being submitted, later ones wait.
+        """
         with self.lock:
             row = self.db.execute(
-                "SELECT * FROM receipts WHERE state='queued' AND not_before<=? ORDER BY id LIMIT 1",
+                "SELECT r.* FROM receipts r WHERE r.state='queued' AND r.not_before<=? "
+                "AND NOT EXISTS (SELECT 1 FROM receipts e WHERE e.id<r.id "
+                "  AND e.state IN ('queued','submitted') "
+                "  AND (e.thread_key=r.thread_key OR (r.channel LIKE 'D%' AND e.channel=r.channel))) "
+                "ORDER BY r.id LIMIT 1",
                 (self.now(),)).fetchone()
         return dict(row) if row else None
+
+    def first_submitted_at(self, op_id: str) -> float | None:
+        with self.lock:
+            row = self.db.execute("SELECT MIN(at) t FROM transitions WHERE op_id=? AND to_state='submitted'",
+                                  (op_id,)).fetchone()
+        return row["t"] if row and row["t"] is not None else None
 
     def recover_after_restart(self) -> list[dict]:
         """submitted/accepted -> needs-reconciliation (never replayed)."""

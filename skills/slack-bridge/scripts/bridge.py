@@ -430,6 +430,7 @@ class Bridge:
                 if t.get("root_ts"):
                     common.mark_stopped(self.home, t["channel"], t["root_ts"])
             log.info("stopped operations: %s", ", ".join(stopped) or "none")
+            self.clear_waiting(stopped)
             text = self.cfg.get("stop_message")
         elif cmd == "help":
             text = self.cfg.get("help_text") or common.DEFAULT_CONFIG["help_text"]
@@ -615,25 +616,109 @@ class Bridge:
                       "slackctl.sh ops resolve/retry.", op["op_id"], result.detail)
             self.on_delivery_result(op, "unknown-result", result)
             return "unknown-result"
+        if result.outcome == "busy":
+            return self.on_busy(op, result, attempts)
         retries = max(1, int(self.cfg.get("webhook_retries", 3)))
         if result.outcome == "retry" and attempts < retries:
             delay = 3 ** (attempts - 1)
             self.store.transition(op["op_id"], "queued", f"retry after {result.detail}",
-                                  not_before=time.time() + delay)
+                                  not_before=self.now() + delay)
             log.warning("webhook not reached for %s (%s); retry %d/%d in %ss", op["op_id"],
                         result.detail, attempts, retries, delay)
-            self.on_delivery_result(op, "queued", result)
             return "queued"
         self.store.transition(op["op_id"], "failed", result.detail)
         self.stats["failed"] += 1
-        if result.outcome == "rejected":
-            log.error("webhook rejected %s (%s); the webhook URL or Authorization value is "
-                      "probably stale. Run scripts/doctor.sh and scripts/reconfigure.sh.",
-                      op["op_id"], result.detail)
+        if result.outcome == "rejected" and result.status in webhook.CREDENTIAL_STATUSES:
+            log.error("webhook rejected %s (%s); the Authorization value is probably stale. "
+                      "Run scripts/doctor.sh and scripts/reconfigure.sh.", op["op_id"], result.detail)
+        elif result.outcome == "rejected" and result.status in webhook.STALE_URL_STATUSES:
+            log.error("webhook rejected %s (%s); the webhook URL is probably stale. "
+                      "Run scripts/doctor.sh and scripts/reconfigure.sh.", op["op_id"], result.detail)
+        elif result.outcome == "rejected":
+            log.error("webhook rejected %s (%s)", op["op_id"], result.detail)
         else:
             log.error("giving up on %s after %d attempts (%s)", op["op_id"], attempts, result.detail)
         self.on_delivery_result(op, "failed", result)
         return "failed"
+
+    def busy_delay(self, attempts: int) -> float:
+        """Backoff after the n-th busy answer: webhook_busy_retry_delays, then the interval."""
+        delays = self.cfg.get("webhook_busy_retry_delays") or common.DEFAULT_CONFIG["webhook_busy_retry_delays"]
+        interval = float(self.cfg.get("webhook_busy_retry_interval_seconds", 300))
+        return float(delays[attempts - 1]) if 0 < attempts <= len(delays) else interval
+
+    def on_busy(self, op: dict, result, attempts: int) -> str:
+        """The routine answered but did not take the run (usually: still busy with the
+        previous message). Keep the operation queued, in thread order, and retry slowly."""
+        first = self.store.first_submitted_at(op["op_id"]) or self.now()
+        elapsed = self.now() - first
+        delay = self.busy_delay(attempts)
+        budget = float(self.cfg.get("webhook_busy_max_seconds", 900))
+        if elapsed + delay <= budget + 1:
+            self.store.transition(op["op_id"], "queued", f"busy: {result.detail}; retry in {int(delay)}s",
+                                  not_before=self.now() + delay)
+            log.warning("webhook busy for %s (%s); retry %d in %ds (%ds of %ds used)", op["op_id"],
+                        result.detail, attempts, int(delay), int(elapsed), int(budget))
+            if attempts == 1:
+                self.show_queued(op, True)
+            else:
+                self.refresh_queued_status(op)
+            return "queued"
+        self.store.transition(op["op_id"], "failed", f"busy: {result.detail}; gave up after {int(elapsed)}s")
+        self.stats["failed"] += 1
+        log.error("webhook stayed busy for %s (%s) for %ds; giving up and asking to resend",
+                  op["op_id"], result.detail, int(elapsed))
+        self.show_queued(op, False)
+        self.on_delivery_result(op, "failed", result,
+                                notice=self.cfg.get("busy_failed_text") or common.DEFAULT_CONFIG["busy_failed_text"])
+        return "failed"
+
+    def _session_of(self, op: dict) -> dict | None:
+        try:
+            return json.loads(op["payload"] or "{}").get("agent_session")
+        except Exception:
+            return None
+
+    def show_queued(self, op: dict, on: bool) -> None:
+        """While waiting on a busy webhook: '排队中…' in the agent view, or a ⏳ reaction."""
+        if self.web is None or self.dry_run:
+            return
+        session = self._session_of(op)
+        if session:
+            if on:
+                self.refresh_queued_status(op)
+            return
+        name = self.cfg.get("queued_reaction")
+        if name and op.get("ts"):
+            fn = self.web.reactions_add if on else self.web.reactions_remove
+            self._safe(fn, channel=op["channel"], timestamp=op["ts"], name=name)
+
+    def clear_waiting(self, op_ids: list[str]) -> None:
+        """Stopped operations that were waiting on a busy webhook: drop ⏳ / Working…."""
+        for op_id in op_ids:
+            op = self.store.get(op_id)
+            if not op or not op.get("attempts"):
+                continue
+            session = self._session_of(op)
+            if session and self.web is not None and not self.dry_run:
+                self.set_session_status(session["channel"], session["thread_ts"], "active")
+            else:
+                self.show_queued(op, False)
+
+    def refresh_queued_status(self, op: dict) -> None:
+        session = self._session_of(op)
+        if not session or self.web is None or self.dry_run:
+            return
+        # Keep the session in "processing" (Working… + Stop) and, where Slack's
+        # compatibility bridge still supports it, show the queue text.
+        self.set_session_status(session["channel"], session["thread_ts"], "processing")
+        text = self.cfg.get("queued_status_text") or common.DEFAULT_CONFIG["queued_status_text"]
+        try:
+            self.slack_api("assistant.threads.setStatus", {
+                "channel_id": session["channel"], "thread_ts": session["thread_ts"],
+                "status": text, "loading_messages": [text]})
+        except Exception:
+            pass
 
     def before_submit(self, op: dict) -> tuple[str, str] | None:
         """Last check before sending: stop wins. None = go ahead."""
@@ -644,9 +729,11 @@ class Bridge:
             return ("ignored", f"thread paused before submit ({thread.get('state_reason') or ''})")
         return None
 
-    def on_delivery_result(self, op: dict, state: str, result) -> None:
+    def on_delivery_result(self, op: dict, state: str, result, notice: str | None = None) -> None:
         if state == "accepted":
             self.store.reset_counter("webhook_failures")
+            if op.get("attempts"):  # it had waited on a busy webhook
+                self.show_queued(op, False)
             return
         n = self.store.bump("webhook_failures")
         threshold = int(self.cfg.get("report_webhook_failures", 3))
@@ -665,7 +752,7 @@ class Bridge:
                 self._safe(self.web.reactions_add, channel=op["channel"], timestamp=op["ts"], name=err)
             if state == "failed" and op.get("actor_type") == "human":
                 reply = payload.get("reply") or {}
-                text = self.cfg.get("error_text") or common.DEFAULT_CONFIG["error_text"]
+                text = notice or self.cfg.get("error_text") or common.DEFAULT_CONFIG["error_text"]
                 self.notify(reply.get("channel") or op["channel"], reply.get("thread_ts"), text)
 
     # -- monitoring ------------------------------------------------------------
@@ -825,7 +912,7 @@ class Bridge:
             return
         key = storemod.thread_key(self.ident.team_id, channel, thread_ts, self.ident.app_id)
         self.store.ensure_thread(key, self.ident.team_id, channel, thread_ts, self.ident.app_id)
-        self.store.stop_thread(key, f"agent view Stop by {actor.user}")
+        self.clear_waiting(self.store.stop_thread(key, f"agent view Stop by {actor.user}"))
         if self.dry_run:
             return
         self.set_session_status(channel, thread_ts, "active")

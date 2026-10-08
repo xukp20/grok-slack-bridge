@@ -114,9 +114,21 @@ markers are never treated as control signals.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `webhook_timeout_seconds` | `20` | a timeout **after** the request was sent is an unknown result: never resent automatically |
-| `webhook_retries` | `3` | attempts when the request provably did not arrive (connect errors, 429, 502, 503); 1s/3s/9s backoff |
+| `webhook_retries` | `3` | attempts when the request provably was not sent (connect/DNS/TLS errors); 1s/3s/9s backoff |
+| `webhook_busy_retry_delays` | `[20, 40, 80, 160]` | seconds to wait after the 1st, 2nd, … "busy" answer (HTTP 400/408/409/425/429/5xx, typically the routine still running the previous message) |
+| `webhook_busy_retry_interval_seconds` | `300` | wait after later busy answers |
+| `webhook_busy_max_seconds` | `900` | give up once the next retry would exceed this many seconds since the first attempt; the user then gets `busy_failed_text` and the operation is `failed` (counted in webhook problems) |
+| `queued_status_text` | `排队中…` | shown in the agent view while waiting (session stays "processing"; the text uses Slack's legacy `assistant.threads.setStatus`, best effort) |
+| `queued_reaction` | `hourglass_flowing_sand` | ⏳ on the message while waiting, when there is no agent session (empty = none) |
+| `busy_failed_text` | `抱歉，这条消息一直没能送达…请稍后重新发送一次。` | fixed text after the busy retries are used up |
 | `catchup_enabled`, `catchup_window_hours` | `true`, `24` | after a reconnect, read followed threads (`conversations.replies`) and process missed messages once |
 | `retention_days` | `30` | finished receipts older than this are pruned |
+
+Only 401/403 (stale Authorization) and 404/410 (stale URL) fail at once
+with `error_text`. Waiting operations keep thread order: later messages of
+the same thread (or the same DM) wait behind them, and `stop`/`停` cancels
+them. Each Slack message starts its own routine run, so busy answers from
+overlapping runs are expected, not a configuration problem.
 
 State lives in `run/bridge.sqlite` (receipts, transitions, threads).
 Operations move `received → queued → submitted → accepted → completed |

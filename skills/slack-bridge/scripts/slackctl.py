@@ -62,7 +62,7 @@ BOT_EVENTS = [
 DEFAULT_SLASH_COMMAND = "/grok"
 # Slack agent features ("Agents" in app settings / manifest features.agent_view).
 AGENT_SCOPES = ["assistant:write"]
-AGENT_EVENTS = ["app_context_changed", "agent_session_stopped", "agent_session_title_changed"]
+AGENT_EVENTS = ["app_home_opened", "app_context_changed", "agent_session_stopped", "agent_session_title_changed"]
 DEFAULT_PROMPTS = [
     {"title": "What can you do?", "message": "What can you help me with here in Slack?"},
     {"title": "Summarize this channel",

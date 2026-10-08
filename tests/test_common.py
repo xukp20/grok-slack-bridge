@@ -198,6 +198,7 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(m["features"]["app_home"]["messages_tab_enabled"])
         self.assertIn("assistant:write", m["oauth_config"]["scopes"]["bot"])
         self.assertIn("agent_session_stopped", m["settings"]["event_subscriptions"]["bot_events"])
+        self.assertIn("app_home_opened", m["settings"]["event_subscriptions"]["bot_events"])
         self.assertLessEqual(len(m["features"]["agent_view"]["suggested_prompts"]), 4)
 
     def test_plain_manifest_has_no_agent_features(self):

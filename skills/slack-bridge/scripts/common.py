@@ -184,7 +184,7 @@ def coerce_config_value(key: str, raw: str) -> Any:
 # ---------------------------------------------------------------------------
 
 # Agent (agent_view) events the bridge handles itself instead of forwarding.
-AGENT_EVENTS = {"app_context_changed", "agent_session_stopped", "agent_session_title_changed"}
+AGENT_EVENTS = {"app_home_opened", "app_context_changed", "agent_session_stopped", "agent_session_title_changed"}
 
 # Message subtypes that still represent a human writing to the bot.
 ALLOWED_SUBTYPES = {None, "", "file_share", "thread_broadcast"}

@@ -43,7 +43,7 @@ One-time, done by a Slack workspace member who may install apps.
 
 Events: `app_mention`, `message.im`, `message.channels`, `message.groups`,
 `message.mpim`, `reaction_added`, plus the agent events
-`app_context_changed`, `agent_session_stopped`, `agent_session_title_changed`
+`app_home_opened`, `app_context_changed`, `agent_session_stopped`, `agent_session_title_changed`
 (drop them and the scope with `render-manifest --no-agent-view` for a plain
 bot; that also drops `features.app_home.agent_tasks_enabled`).
 

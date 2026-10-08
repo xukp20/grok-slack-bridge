@@ -299,6 +299,9 @@ class Bridge:
             if msg:
                 self._safe(self.web.chat_postMessage, channel=channel, thread_ts=thread_ts, text=msg)
             self.mark_stopped(channel, thread_ts)
+        elif etype == "app_home_opened":
+            # Required by Slack for agent_view; nothing to do (no Home tab).
+            log.debug("app home opened user=%s tab=%s", event.get("user"), event.get("tab"))
         elif etype == "agent_session_title_changed":
             log.info("session renamed channel=%s thread=%s", event.get("channel"),
                      event.get("thread_ts"))

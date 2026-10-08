@@ -51,6 +51,7 @@ settings:
     bot_events:
       - app_mention
       - message.im
+      - app_home_opened               # added (Slack requires it for agent_view)
       - app_context_changed           # added
       - agent_session_stopped         # added (enables the Stop button)
       - agent_session_title_changed   # added
@@ -78,6 +79,7 @@ plan (or a Developer Program sandbox).
 | `message.im` / `app_mention` | calls `agents.sessions.setStatus` with `status: processing` (title from the first message, `initiator_user_id` = sender) on the message's thread (`thread_ts`, or the message itself for a new conversation), then forwards the payload with `agent_session` set and `reply.thread_ts` = that thread |
 | `app_context_changed` | remembers the channel(s) the user is viewing; added to that user's next payloads as `viewing_context` |
 | `agent_session_stopped` | sets the session back to `active`, posts `stop_message` in the thread, and records the stop so a later `--session-status processing` does not re-open it |
+| `app_home_opened` | logged only (Slack requires the subscription for agent view) |
 | `agent_session_title_changed` | logged only |
 
 Agent-view events are never forwarded to the webhook, so they do not wake

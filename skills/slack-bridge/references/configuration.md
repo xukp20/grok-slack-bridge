@@ -113,9 +113,9 @@ markers are never treated as control signals.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `webhook_timeout_seconds` | `20` | a timeout **after** the request was sent is an unknown result: never resent automatically |
+| `webhook_timeout_seconds` | `20` | a timeout **after** the request was sent (and HTTP 504) is an unknown result: never resent automatically |
 | `webhook_retries` | `3` | attempts when the request provably was not sent (connect/DNS/TLS errors); 1s/3s/9s backoff |
-| `webhook_busy_retry_delays` | `[20, 40, 80, 160]` | seconds to wait after the 1st, 2nd, … "busy" answer (HTTP 400/408/409/425/429/5xx, typically the routine still running the previous message) |
+| `webhook_busy_retry_delays` | `[20, 40, 80, 160]` | seconds to wait after the 1st, 2nd, … "busy" answer (HTTP 400/408/409/425/429/5xx except 504, typically the routine still running the previous message) |
 | `webhook_busy_retry_interval_seconds` | `300` | wait after later busy answers |
 | `webhook_busy_max_seconds` | `900` | give up once the next retry would exceed this many seconds since the first attempt; the user then gets `busy_failed_text` and the operation is `failed` (counted in webhook problems) |
 | `queued_status_text` | `排队中…` | shown in the agent view while waiting (session stays "processing"; the text uses Slack's legacy `assistant.threads.setStatus`, best effort) |

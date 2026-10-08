@@ -26,7 +26,7 @@ posts the answer as the bot and closes the operation.
   overrides only tighten. Default: owner only, no bots.
 - **Reliability**: persisted dedup, operation state machine, a webhook
   timeout is `unknown-result` (never blindly resent), "busy" answers
-  (400/409/429/5xx from overlapping routine runs) are retried slowly in
+  (400/409/429/5xx except 504, from overlapping routine runs) are retried slowly in
   thread order with "排队中…" shown, in-flight work becomes
   `needs-reconciliation` after a restart (never replayed), followed threads
   are caught up after reconnects.

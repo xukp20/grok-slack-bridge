@@ -5,11 +5,12 @@ Outcomes:
   retry     the request was definitely not processed (connect/DNS/TLS error,
             failure while sending) -> safe to queue again
   busy      the endpoint answered but did not take the run now (400, 408, 409,
-            425, 429, any 5xx). Typical cause: a Grok routine still busy with
+            425, 429, 5xx except 504). Typical cause: a Grok routine still busy with
             the previous message rejects an overlapping run. Queued again with
             a slow backoff (webhook_busy_*), in thread order.
   unknown   no answer after the request was sent (timeout, disconnect while
-            waiting) -> the agent may be running it; never resent automatically
+            waiting, or HTTP 504: a gateway timed out after forwarding it)
+            -> the agent may be running it; never resent automatically
   rejected  the endpoint refused it for good: 401/403 (stale Authorization),
             404/410 (stale URL), other 4xx
 """
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 BUSY_STATUSES = {400, 408, 409, 425, 429}
 CREDENTIAL_STATUSES = {401, 403}
 STALE_URL_STATUSES = {404, 410}
+UNKNOWN_STATUSES = {504}  # gateway timeout: the run may have started
 
 
 @dataclass
@@ -83,6 +85,8 @@ def classify_status(status: int) -> Result:
     """Outcome for an HTTP response status (the response did arrive)."""
     if 200 <= status < 300:
         return Result("accepted", status)
+    if status in UNKNOWN_STATUSES:
+        return Result("unknown", status, f"HTTP {status} (gateway timeout; the run may have started)")
     if status in BUSY_STATUSES or status >= 500:
         return Result("busy", status, f"HTTP {status}")
     if status in CREDENTIAL_STATUSES:

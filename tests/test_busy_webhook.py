@@ -34,8 +34,9 @@ def run_due(b, clock, until):
 
 class ClassifyTests(unittest.TestCase):
     def test_statuses(self):
-        for code in (400, 408, 409, 425, 429, 500, 502, 503, 504):
+        for code in (400, 408, 409, 425, 429, 500, 502, 503, 599):
             self.assertEqual(webhook.classify_status(code).outcome, "busy", code)
+        self.assertEqual(webhook.classify_status(504).outcome, "unknown")
         for code in (401, 403, 404, 410, 422):
             self.assertEqual(webhook.classify_status(code).outcome, "rejected", code)
         self.assertEqual(webhook.classify_status(204).outcome, "accepted")
@@ -88,6 +89,17 @@ class BusyRetryTests(unittest.TestCase):
             self.assertEqual([p["text"] for p in b.web.calls_of("chat_postMessage")],
                              [common.DEFAULT_CONFIG["error_text"]])
             self.assertEqual(b.store.counter("webhook_failures"), 1)
+
+    def test_504_is_unknown_and_never_resent(self):
+        b, clock = clocked()
+        b.poster = FakePoster(504)
+        e = env("q")
+        b._handle_envelope(e)
+        self.assertEqual(b.deliver(b.store.next_queued()), "unknown-result")
+        clock["t"] += 10_000
+        self.assertIsNone(b.store.next_queued())
+        self.assertEqual(len(b.poster.payloads), 1)
+        self.assertEqual(b.web.calls_of("chat_postMessage"), [])
 
     def test_timeout_still_unknown_and_never_resent(self):
         b, clock = clocked()

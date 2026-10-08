@@ -212,6 +212,7 @@ class WebhookOutcomeTests(unittest.TestCase):
         self.assertEqual(self.post("/429").outcome, "busy")
         self.assertEqual(self.post("/400").outcome, "busy")
         self.assertEqual(self.post("/500").outcome, "busy")
+        self.assertEqual(self.post("/504").outcome, "unknown")
         self.assertEqual(self.post("/401").outcome, "rejected")
         self.assertEqual(self.post("/slow", timeout=0.5).outcome, "unknown")
 

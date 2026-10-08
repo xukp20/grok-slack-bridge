@@ -148,7 +148,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "log_message_text": False,
     "webhook_timeout_seconds": 20,
     "webhook_retries": 3,               # connect/TLS failures (request never sent)
-    # The routine answered 400/408/409/425/429/5xx: usually busy with the previous
+    # The routine answered 400/408/409/425/429/5xx (not 504): usually busy with the previous
     # message (each Slack message starts its own routine run). Retry slowly, in order.
     "webhook_busy_retry_delays": [20, 40, 80, 160],
     "webhook_busy_retry_interval_seconds": 300,

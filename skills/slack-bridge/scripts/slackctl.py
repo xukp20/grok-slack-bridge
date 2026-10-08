@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 import common  # noqa: E402
+import outbox as outboxmod  # noqa: E402
 
 BOT_SCOPES = [
     "app_mentions:read",
@@ -322,6 +323,21 @@ def finish_op(st, op_id: str, state: str, reason: str) -> str:
     return row["state"]
 
 
+def mention_allowed(cfg: dict, st, op_id: str | None, extra) -> set[str]:
+    """Who a reply may ping: owner, the requester, allow-listed bots, mention_allowlist."""
+    allowed = {cfg.get("owner_user_id") or ""}
+    allowed |= set(cfg.get("mention_allowlist") or [])
+    allowed |= {str(e.get("user_id")) for e in cfg.get("bot_allowlist") or []
+                if isinstance(e, dict) and e.get("user_id")}
+    for item in extra or []:
+        allowed |= {v.strip().strip("<@>") for v in item.replace(",", " ").split()}
+    if st is not None and op_id:
+        row = st.get(op_id)
+        if row and row.get("actor"):
+            allowed.add(row["actor"])
+    return {a for a in allowed if a}
+
+
 def stop_gate(st, op_id: str | None, channel: str, thread_ts: str | None) -> str | None:
     """Why a reply must not be sent (operation or thread stopped), else None."""
     if st is None:
@@ -383,6 +399,7 @@ def cmd_reply(args) -> int:
     text = read_text(args).strip()
     if not text:
         die("refusing to send an empty message (use --no-reply to record that you chose not to answer)")
+    text = outboxmod.sanitize(text, mention_allowed(cfg, st, args.op, args.allow_mention))
     client = web_client()
     try:
         sent = post_reply(client, args.channel, text, args.thread_ts, args.format)
@@ -403,6 +420,158 @@ def cmd_reply(args) -> int:
             if session.get("ok") else f"error: {session.get('error')}"
     print(json.dumps(out))
     return 0
+
+
+def cmd_upload(args) -> int:
+    """Upload a local file into a channel/thread (needs files:write)."""
+    home = common.resolve_home(args.home)
+    cfg = common.load_config(home)
+    path = Path(args.file)
+    if not path.is_file():
+        die(f"no such file: {path}")
+    st = open_store_quiet(home)
+    gate = None if args.force else stop_gate(st, args.op, args.channel, args.thread_ts)
+    if gate:
+        print(json.dumps({"ok": False, "sent": False, "stopped": True, "reason": gate}))
+        return 3
+    client = web_client()
+    kwargs = {"channel": args.channel, "file": str(path), "filename": args.filename or path.name,
+              "title": args.title or path.name}
+    if args.thread_ts:
+        kwargs["thread_ts"] = args.thread_ts
+    if args.comment:
+        kwargs["initial_comment"] = outboxmod.sanitize(args.comment, mention_allowed(cfg, st, args.op, None))
+    try:
+        resp = client.files_upload_v2(**kwargs)
+    except Exception as exc:
+        err = slack_error(exc)
+        hint = {"missing_scope": " (add files:write, then reinstall the app)",
+                "not_in_channel": " (/invite the bot to the channel first)"}.get(err, "")
+        die(f"upload failed: {err}{hint}", 1)
+    f = resp.get("file") or (resp.get("files") or [{}])[0]
+    print(json.dumps({"ok": True, "file_id": f.get("id"), "name": f.get("name"),
+                      "permalink": f.get("permalink")}))
+    return 0
+
+
+def cmd_download(args) -> int:
+    """Download a Slack file (by F… id or url_private) with the bot token."""
+    client = web_client()
+    url = args.url
+    name = None
+    if args.file_id:
+        try:
+            info = client.files_info(file=args.file_id).get("file") or {}
+        except Exception as exc:
+            err = slack_error(exc)
+            hint = {"missing_scope": " (add files:read, then reinstall the app)",
+                    "file_not_found": " (wrong id, or the file is not shared where the bot is)"}.get(err, "")
+            die(f"files.info failed: {err}{hint}", 1)
+        url = info.get("url_private_download") or info.get("url_private")
+        name = info.get("name")
+    if not url:
+        die("give --file-id F… or --url <url_private>")
+    if not urllib.parse.urlparse(url).hostname or \
+            not urllib.parse.urlparse(url).hostname.endswith(SLACK_FILE_HOSTS):
+        die("refusing to send the bot token to a non-Slack host")
+    out = Path(args.out or name or Path(urllib.parse.urlparse(url).path).name or "download.bin")
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {common.env_value(common.ENV_BOT_TOKEN)}"})
+    try:
+        with urllib.request.build_opener(_SlackOnlyRedirects).open(req, timeout=60) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            data = resp.read()
+    except urllib.error.HTTPError as exc:
+        die(f"download failed: HTTP {exc.code}", 1)
+    except Exception as exc:
+        die(f"download failed: {type(exc).__name__}", 1)
+    if looks_like_login_page(ctype, data):
+        die("Slack returned an HTML page instead of the file: the bot token is missing files:read "
+            "(add it and reinstall the app) or the file is not shared in a conversation the bot is in.", 1)
+    out.write_bytes(data)
+    print(json.dumps({"ok": True, "path": str(out), "bytes": len(data), "content_type": ctype}))
+    return 0
+
+
+SLACK_FILE_HOSTS = ("slack.com", "slack-edge.com", "slack-files.com")
+
+
+class _SlackOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only within Slack, so the token never leaves Slack."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = urllib.parse.urlparse(newurl).hostname or ""
+        if not host.endswith(SLACK_FILE_HOSTS):
+            raise urllib.error.HTTPError(newurl, code, "redirect to a non-Slack host refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def looks_like_login_page(content_type: str, data: bytes) -> bool:
+    head = data[:512].lstrip().lower()
+    return "text/html" in (content_type or "").lower() and (
+        head.startswith(b"<!doctype html") or head.startswith(b"<html"))
+
+
+def health(home: Path) -> dict:
+    """Process health and task state, reported separately."""
+    pid = _pid_alive(home)
+    proc = {"running": bool(pid), "pid": pid}
+    hb_path = home / "run" / "heartbeat.json"
+    if hb_path.exists():
+        try:
+            h = json.loads(hb_path.read_text())
+            proc.update(heartbeat_age=int(time.time()) - int(h.get("heartbeat_at", 0)),
+                        connected=h.get("connected"), started_at=h.get("started_at"),
+                        last_connected_at=h.get("last_connected_at"),
+                        webhook_host=h.get("webhook_host"), bot_user_id=h.get("bot_user_id"),
+                        app_id=h.get("app_id"))
+        except Exception:
+            proc["heartbeat"] = "unreadable"
+    proc["healthy"] = bool(pid) and proc.get("connected") is True and proc.get("heartbeat_age", 999) < 120
+    tasks: dict = {}
+    try:
+        import store as storemod
+        st = storemod.open_store(home)
+        counts = st.counts()
+        threads = st.list_threads(200)
+        by_state: dict = {}
+        for t in threads:
+            by_state[t["state"]] = by_state.get(t["state"], 0) + 1
+        tasks = {"operations": counts, "threads": by_state,
+                 "needs_decision": [o["op_id"] for o in st.list_ops(
+                     states=["needs-reconciliation", "unknown-result"], limit=20)],
+                 "failed_recent": [o["op_id"] for o in st.list_ops(states=["failed"], limit=5)],
+                 "webhook_failures_in_a_row": st.counter("webhook_failures")}
+    except Exception as exc:
+        tasks = {"error": type(exc).__name__}
+    return {"process": proc, "tasks": tasks}
+
+
+def cmd_health(args) -> int:
+    home = common.resolve_home(args.home)
+    h = health(home)
+    if args.json:
+        print(json.dumps(h, indent=2))
+    else:
+        p, t = h["process"], h["tasks"]
+        print("== process")
+        if p["running"]:
+            print(f"  running pid {p['pid']}, heartbeat {p.get('heartbeat_age', '?')}s ago, "
+                  f"connected={p.get('connected')}, healthy={p['healthy']}")
+            print(f"  bot {p.get('bot_user_id')} app {p.get('app_id')} webhook host {p.get('webhook_host')}")
+        else:
+            print("  not running (scripts/start.sh)")
+        print("== tasks")
+        if "error" in t:
+            print(f"  state database unavailable ({t['error']})")
+        else:
+            ops = ", ".join(f"{k}={v}" for k, v in sorted(t["operations"].items())) or "none"
+            print(f"  operations: {ops}")
+            print("  threads: " + (", ".join(f"{k}={v}" for k, v in sorted(t["threads"].items())) or "none"))
+            if t["needs_decision"]:
+                print(f"  need a decision (slackctl.sh ops show/resolve): {', '.join(t['needs_decision'])}")
+            if t["webhook_failures_in_a_row"]:
+                print(f"  webhook problems in a row: {t['webhook_failures_in_a_row']}")
+    return 0 if h["process"]["running"] else 1
 
 
 def _fmt_time(t) -> str:
@@ -802,6 +971,22 @@ def cmd_doctor(args) -> int:
         except Exception:
             pass
     add(True if pid else None, "bridge process", detail)
+    lock_path = home / "run" / "bridge.lock"
+    if pid:
+        add(None if not lock_path.exists() else True, "single-instance lock",
+            str(lock_path) if lock_path.exists() else
+            "no run/bridge.lock: the running bridge predates the lock (restart.sh to pick up new code)")
+    t = health(home)["tasks"]
+    if "error" in t:
+        add(None, "task state", f"state database unavailable ({t['error']})")
+    else:
+        attention = len(t["needs_decision"])
+        ops = ", ".join(f"{k}={v}" for k, v in sorted(t["operations"].items())) or "none"
+        add(None if attention or t["webhook_failures_in_a_row"] else True, "task state",
+            f"{ops}" + (f"; {attention} need a decision (slackctl.sh ops list --state needs-reconciliation)"
+                        if attention else "")
+            + (f"; {t['webhook_failures_in_a_row']} webhook problems in a row"
+               if t["webhook_failures_in_a_row"] else ""))
 
     if args.json:
         print(json.dumps([{"status": s, "check": c, "detail": d} for s, c, d in results], indent=2))
@@ -837,6 +1022,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-reply", action="store_true",
                    help="send nothing; record that the agent saw the message and chose not to reply")
     r.add_argument("--reason", help="note stored with --no-reply")
+    r.add_argument("--allow-mention", action="append", metavar="U…",
+                   help="user ID this reply may ping (repeatable); others are rendered inert")
     r.add_argument("--force", action="store_true",
                    help="post even if the task/thread was stopped (manual messages only)")
     r.add_argument("--session-status", choices=SESSION_STATUSES + ("none",),
@@ -905,6 +1092,27 @@ def build_parser() -> argparse.ArgumentParser:
     th.add_argument("--limit", type=int, default=30)
     th.add_argument("--json", action="store_true")
     th.set_defaults(func=cmd_threads)
+
+    up = sub.add_parser("upload", help="upload a file to a channel/thread (files:write)")
+    up.add_argument("--channel", required=True)
+    up.add_argument("--thread-ts")
+    up.add_argument("--file", required=True)
+    up.add_argument("--filename")
+    up.add_argument("--title")
+    up.add_argument("--comment", help="message posted with the file")
+    up.add_argument("--op", help="operation_id (refuses if the task was stopped)")
+    up.add_argument("--force", action="store_true")
+    up.set_defaults(func=cmd_upload)
+
+    dl = sub.add_parser("download", help="download a Slack file by id or url_private (files:read)")
+    dl.add_argument("--file-id")
+    dl.add_argument("--url")
+    dl.add_argument("--out", help="output path (default: the file's name)")
+    dl.set_defaults(func=cmd_download)
+
+    he = sub.add_parser("health", help="process health and task state (separately)")
+    he.add_argument("--json", action="store_true")
+    he.set_defaults(func=cmd_health)
 
     c = sub.add_parser("config", help="show/set non-secret config.json values")
     c.add_argument("action", choices=("show", "set", "unset", "path"))

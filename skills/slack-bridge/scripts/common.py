@@ -54,6 +54,15 @@ def describe_secret(name: str, environ: dict[str, str] | None = None) -> str:
     return f"set ({len(value)} chars)"
 
 
+def take_secrets(names: Iterable[str] = REQUIRED_ENV) -> dict[str, str]:
+    """Read the secrets and remove them from os.environ, so nothing the bridge
+    spawns (or any library that shells out) inherits them."""
+    out = {n: env_value(n) for n in names}
+    for n in names:
+        os.environ.pop(n, None)
+    return out
+
+
 def check_env(names: Iterable[str] = REQUIRED_ENV,
               environ: dict[str, str] | None = None) -> list[str]:
     """Return human-readable problems with the given env vars (empty = ok)."""
@@ -110,10 +119,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "stop": ["stop", "停", "停止", "别回了"],
         "new": ["new", "new task", "新任务"],
         "resume": ["resume", "继续"],
+        "help": ["help", "帮助"],
+        "status": ["status", "状态"],
     },
+    "help_text": ("Mention me or DM me with a question or task. Commands: `stop` (or 停/停止) "
+                  "stops the current task in this thread; the owner can also use `new` (new task, "
+                  "resets bot turn limits), `resume` and `status`."),
     "new_task_message": "OK, new task. Bot turn counter reset.",
     "resume_message": "Resumed.",
     "deny_message": "Sorry, I only take requests from my owner here.",
+    # Outgoing messages and monitoring (stage 4)
+    "mention_allowlist": [],            # extra user IDs replies may ping (owner/requester always may)
+    "outbox_max_items": 50,
+    "outbox_min_interval_seconds": 1.0,
+    "report_channel": "",               # where bridge restarts / webhook failures are reported
+    "report_thread_ts": "",
+    "report_min_interval_seconds": 900,
+    "report_webhook_failures": 3,       # consecutive problems before a report (0 = never)
+    "report_disconnect_seconds": 300,
     "error_text": "Sorry, something went wrong on my side. The owner can check the bridge log.",
     "slash_ack_text": "Got it. I'll answer in our DM.",
     "slash_usage_text": "Usage: /grok <question or task>",
@@ -141,7 +164,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 ACCESS_MODES = ("everyone", "allowlist", "owner_only")
 BOT_ACCESS_MODES = ("none", "allowlist", "all")
-LIST_KEYS = ("user_allowlist", "user_denylist", "bot_denylist", "channel_allowlist")
+LIST_KEYS = ("user_allowlist", "user_denylist", "bot_denylist", "channel_allowlist", "mention_allowlist")
 
 
 def resolve_home(explicit: str | None = None) -> Path:

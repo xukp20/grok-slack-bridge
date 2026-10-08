@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Show whether the bridge is running, its heartbeat, and recent log lines.
-# Exit 0 when running, 1 when stopped.
+# Show bridge process health and task state (reported separately), then
+# recent log lines. Exit 0 when the process is running, 1 when stopped
+# (task problems such as needs-reconciliation do not change the exit code).
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 pid="$(running_pid)"
@@ -10,15 +11,8 @@ if [[ -n "$pid" ]]; then
 else
   echo "process:   stopped"
 fi
-if [[ -f "$RUN_DIR/heartbeat.json" && -n "$pid" ]]; then
-  "${PY:-python3}" - "$RUN_DIR/heartbeat.json" <<'PY' 2>/dev/null || true
-import json, sys, time
-h = json.load(open(sys.argv[1]))
-print(f"heartbeat: {int(time.time()) - h['heartbeat_at']}s ago, connected={h.get('connected')}")
-print(f"events:    received={h.get('received')} forwarded={h.get('forwarded')} "
-      f"skipped={h.get('skipped')} failed={h.get('failed')}")
-print(f"bot:       {h.get('bot_user_id')}  webhook host: {h.get('webhook_host')}")
-PY
+if [[ -x "$PY" ]]; then
+  "$PY" "$CODE_DIR/slackctl.py" --home "$BRIDGE_HOME" health || true
 fi
 if [[ -f "$LOGFILE" ]]; then
   echo "--- last log lines ($LOGFILE)"

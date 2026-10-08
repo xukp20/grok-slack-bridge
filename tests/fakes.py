@@ -113,7 +113,7 @@ def make_bridge(home=None, poster=None, **cfg):
     import bridge as bridgemod
     home = home or make_home(**cfg)
     web = FakeWeb()
-    b = bridgemod.Bridge(home, web=web, poster=poster or FakePoster())
+    b = bridgemod.Bridge(home, web=web, poster=poster or FakePoster(), secrets={}, sync_outbox=True)
     b.ident.team_id, b.ident.app_id, b.ident.bot_user_id, b.ident.bot_id = TEAM, APP, BOT_USER, BOT_ID
     b.webhook_url = "https://hook.example/x"
     return b

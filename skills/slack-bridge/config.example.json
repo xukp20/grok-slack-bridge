@@ -32,11 +32,28 @@
     "resume": [
       "resume",
       "继续"
+    ],
+    "help": [
+      "help",
+      "帮助"
+    ],
+    "status": [
+      "status",
+      "状态"
     ]
   },
+  "help_text": "Mention me or DM me with a question or task. Commands: `stop` (or 停/停止) stops the current task in this thread; the owner can also use `new` (new task, resets bot turn limits), `resume` and `status`.",
   "new_task_message": "OK, new task. Bot turn counter reset.",
   "resume_message": "Resumed.",
   "deny_message": "Sorry, I only take requests from my owner here.",
+  "mention_allowlist": [],
+  "outbox_max_items": 50,
+  "outbox_min_interval_seconds": 1.0,
+  "report_channel": "",
+  "report_thread_ts": "",
+  "report_min_interval_seconds": 900,
+  "report_webhook_failures": 3,
+  "report_disconnect_seconds": 300,
   "error_text": "Sorry, something went wrong on my side. The owner can check the bridge log.",
   "slash_ack_text": "Got it. I'll answer in our DM.",
   "slash_usage_text": "Usage: /grok <question or task>",

@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import access  # noqa: E402
 import common  # noqa: E402
 import events  # noqa: E402
+import outbox as outboxmod  # noqa: E402
 import store as storemod  # noqa: E402
 import webhook  # noqa: E402
 
@@ -63,7 +64,8 @@ class Decision:
 
 
 class Bridge:
-    def __init__(self, home: Path, dry_run: bool = False, web=None, poster=None, now=time.time):
+    def __init__(self, home: Path, dry_run: bool = False, web=None, poster=None, now=time.time,
+                 secrets: dict | None = None, sync_outbox: bool = False):
         self.home = Path(home)
         self.public_home = self.home  # path shown in reply commands
         self.dry_run = dry_run
@@ -79,8 +81,16 @@ class Bridge:
         self.was_connected = False
         self.stop_event = threading.Event()
         self.wake = threading.Event()
-        self.webhook_url = common.env_value(common.ENV_WEBHOOK_URL)
-        self.webhook_auth = common.normalize_auth_header(common.env_value(common.ENV_WEBHOOK_AUTH))
+        # Secrets come from take_secrets() (removed from os.environ so child
+        # processes never inherit them) or, in tests/dry runs, from the env.
+        self.secrets = secrets if secrets is not None else {
+            n: common.env_value(n) for n in common.REQUIRED_ENV}
+        self.webhook_url = self.secrets.get(common.ENV_WEBHOOK_URL, "")
+        self.webhook_auth = common.normalize_auth_header(self.secrets.get(common.ENV_WEBHOOK_AUTH, ""))
+        self.outbox = outboxmod.Outbox(
+            self._post_now, max_items=int(self.cfg.get("outbox_max_items", 50)),
+            min_interval=float(self.cfg.get("outbox_min_interval_seconds", 1.0)), sync=sync_outbox)
+        self.disconnect_reported = False
         self.poster = poster or webhook.post_json
         self.web = web
         self.socket = None
@@ -97,7 +107,7 @@ class Bridge:
         from slack_sdk import WebClient
         from slack_sdk.socket_mode import SocketModeClient
 
-        self.web = WebClient(token=common.env_value(common.ENV_BOT_TOKEN))
+        self.web = WebClient(token=self.secrets.get(common.ENV_BOT_TOKEN, ""))
         auth = self.web.auth_test()
         self.ident.bot_user_id = auth.get("user_id", "")
         self.ident.bot_id = auth.get("bot_id", "")
@@ -113,7 +123,7 @@ class Bridge:
                  self.ident.bot_user_id, self.ident.app_id or "?", auth.get("team"), auth.get("team_id"))
 
         self.socket = SocketModeClient(
-            app_token=common.env_value(common.ENV_APP_TOKEN),
+            app_token=self.secrets.get(common.ENV_APP_TOKEN, ""),
             web_client=self.web,
             auto_reconnect_enabled=True,
         )
@@ -164,8 +174,17 @@ class Bridge:
                 continue
             log.info("deciding receipt %s left in 'received' before the restart", row["op_id"])
             self.process(msg, row["thread_key"])
-        for problem in access.validate(self.cfg):
+        problems = access.validate(self.cfg)
+        for problem in problems:
             log.warning("config: %s", problem)
+        self.outbox.start()
+        counts = self.store.counts()
+        self.report("startup", (
+            f"{self.cfg.get('bot_name') or 'Bridge'} bridge (re)started (pid {os.getpid()}). "
+            f"In flight before the restart: {len(recovered)} (marked needs-reconciliation, not replayed); "
+            f"bot threads paused: {paused}; waiting for a decision: "
+            f"{counts.get('needs-reconciliation', 0) + counts.get('unknown-result', 0)}"
+            + (f"; config warnings: {len(problems)}" if problems else "") + "."), force=True)
         self.on_startup(recovered)
         self.delivery_thread = threading.Thread(target=self.delivery_loop, name="delivery", daemon=True)
         self.delivery_thread.start()
@@ -197,6 +216,15 @@ class Bridge:
         os.replace(tmp, run / "heartbeat.json")
         if connected and not self.was_connected:
             self.pool.submit(self.catch_up_safe)
+            if self.disconnect_reported:
+                self.disconnect_reported = False
+                self.report("reconnected", "Bridge reconnected to Slack; catching up on followed threads.",
+                            force=True)
+        limit = float(self.cfg.get("report_disconnect_seconds", 300))
+        if not connected and not self.disconnect_reported and now - self.last_connected_at > limit:
+            self.disconnect_reported = True
+            self.report("disconnected", f"Bridge has been disconnected from Slack for "
+                        f"{int(now - self.last_connected_at)}s (auto-reconnect is retrying).")
         self.was_connected = connected
 
     def serve_forever(self) -> None:
@@ -217,6 +245,7 @@ class Bridge:
         log.info("shutting down")
         self.stop_event.set()
         self.wake.set()
+        self.outbox.stop()
         try:
             if self.socket:
                 self.socket.close()
@@ -324,12 +353,13 @@ class Bridge:
         text = " ".join(text.split()).strip(self.COMMAND_STRIP).lower()
         if not text or len(text) > 20:
             return ""
-        words = self.cfg.get("command_words") or common.DEFAULT_CONFIG["command_words"]
-        for cmd in ("stop", "new", "resume"):
+        words = dict(common.DEFAULT_CONFIG["command_words"])
+        words.update(self.cfg.get("command_words") or {})
+        for cmd in ("stop", "new", "resume", "help", "status"):
             if text in {str(w).lower() for w in words.get(cmd, [])}:
-                if cmd in ("new", "resume") and verdict.role != "owner":
+                if cmd in ("new", "resume", "status") and verdict.role != "owner":
                     return ""  # just a normal message from a non-owner
-                if cmd == "resume" and entry is None:
+                if cmd in ("resume", "help", "status") and entry is None:
                     return ""
                 return cmd
         return ""
@@ -388,7 +418,8 @@ class Bridge:
     def run_command(self, msg: events.Msg, thread: dict, decision: Decision) -> str:
         cmd = decision.command
         self.store.transition(msg.op_id, "ignored", decision.reason)
-        targets = {t["thread_key"]: t for t in self.command_targets(msg, thread, cmd)}
+        targets = {} if cmd in ("help", "status") else \
+            {t["thread_key"]: t for t in self.command_targets(msg, thread, cmd)}
         log.info("command %s by %s in %s covers %d thread(s)", cmd, msg.actor, msg.channel, len(targets))
         if cmd == "stop":
             stopped = []
@@ -398,6 +429,10 @@ class Bridge:
                     common.mark_stopped(self.home, t["channel"], t["root_ts"])
             log.info("stopped operations: %s", ", ".join(stopped) or "none")
             text = self.cfg.get("stop_message")
+        elif cmd == "help":
+            text = self.cfg.get("help_text") or common.DEFAULT_CONFIG["help_text"]
+        elif cmd == "status":
+            text = self.status_text(thread if msg.thread_ts else None)
         elif cmd == "new":
             for key in targets:
                 self.store.new_task(key, f"new task from {msg.actor}")
@@ -585,6 +620,7 @@ class Bridge:
                                   not_before=time.time() + delay)
             log.warning("webhook not reached for %s (%s); retry %d/%d in %ss", op["op_id"],
                         result.detail, attempts, retries, delay)
+            self.on_delivery_result(op, "queued", result)
             return "queued"
         self.store.transition(op["op_id"], "failed", result.detail)
         self.stats["failed"] += 1
@@ -607,14 +643,58 @@ class Bridge:
         return None
 
     def on_delivery_result(self, op: dict, state: str, result) -> None:
+        if state == "accepted":
+            self.store.reset_counter("webhook_failures")
+            return
+        n = self.store.bump("webhook_failures")
+        threshold = int(self.cfg.get("report_webhook_failures", 3))
+        if threshold and n >= threshold:
+            status = f" HTTP {result.status}" if getattr(result, "status", 0) else ""
+            self.report("webhook", f"Webhook delivery problems: {n} in a row (last: {result.outcome}"
+                        f"{status}). Messages are kept in the queue; run scripts/doctor.sh. "
+                        "Stale URL/Authorization: scripts/reconfigure.sh.")
         if state in ("failed", "unknown-result") and self.web is not None:
             payload = json.loads(op["payload"] or "{}")
             session = payload.get("agent_session")
             if session:
                 self.set_session_status(session["channel"], session["thread_ts"], "active")
             err = self.cfg.get("error_reaction")
-            if err:
+            if err and op.get("ts"):
                 self._safe(self.web.reactions_add, channel=op["channel"], timestamp=op["ts"], name=err)
+            if state == "failed" and op.get("actor_type") == "human":
+                reply = payload.get("reply") or {}
+                text = self.cfg.get("error_text") or common.DEFAULT_CONFIG["error_text"]
+                self.notify(reply.get("channel") or op["channel"], reply.get("thread_ts"), text)
+
+    # -- monitoring ------------------------------------------------------------
+    def report(self, key: str, text: str, force: bool = False) -> bool:
+        """Operational report to report_channel/report_thread_ts (rate limited per key)."""
+        log.info("report[%s]: %s", key, text)
+        channel = self.cfg.get("report_channel") or ""
+        if not channel or self.dry_run or self.web is None:
+            return False
+        interval = float(self.cfg.get("report_min_interval_seconds", 900))
+        last = float(self.store.meta(f"report:{key}") or 0)
+        if not force and self.now() - last < interval:
+            return False
+        self.store.meta(f"report:{key}", str(self.now()))
+        self.outbox.put(channel, self.cfg.get("report_thread_ts") or None, text)
+        return True
+
+    def status_text(self, thread: dict | None) -> str:
+        counts = self.store.counts()
+        connected = bool(self.socket and self.socket.is_connected()) if self.socket else None
+        up = int((time.time() - self.started_at) / 60)
+        lines = [f"Bridge: pid {os.getpid()}, up {up} min, Slack connected: "
+                 f"{'yes' if connected else 'no' if connected is False else 'n/a'}.",
+                 f"Operations: {counts.get('queued', 0)} queued, {counts.get('accepted', 0)} with the agent, "
+                 f"{counts.get('needs-reconciliation', 0) + counts.get('unknown-result', 0)} need a decision, "
+                 f"{counts.get('failed', 0)} failed."]
+        if thread:
+            policy = access.effective_policy(self.cfg, thread["channel"])
+            lines.append(f"This thread: {thread['state']}, task #{thread['task_id']}, bot turns "
+                         f"{thread['bot_turns']}/{policy['max_bot_turns']}, trigger {policy['trigger']}.")
+        return "\n".join(lines)
 
     # -- catch-up --------------------------------------------------------------
     def catch_up_safe(self) -> None:
@@ -755,12 +835,13 @@ class Bridge:
     # -- outbound helpers ------------------------------------------------------
     def notify(self, channel: str, thread_ts: str | None, text: str) -> None:
         """Bridge-originated message (fixed texts only)."""
-        if self.web is None or self.dry_run:
+        if self.web is None or self.dry_run or not text:
             return
-        kwargs = {"channel": channel, "text": text}
-        if thread_ts:
-            kwargs["thread_ts"] = thread_ts
-        self._safe(self.web.chat_postMessage, **kwargs)
+        self.outbox.put(channel, thread_ts, text, allowed_users=[self.cfg.get("owner_user_id") or ""])
+
+    def _post_now(self, msg: dict) -> None:
+        if self.web is not None:
+            self.web.chat_postMessage(**msg)
 
     def user_info(self, user: str) -> dict:
         if not user or self.web is None:
@@ -788,6 +869,24 @@ class Bridge:
                 return None
             log.warning("%s failed: %s", getattr(fn, "__name__", "slack call"), code)
             return None
+
+
+def acquire_instance_lock(home: Path):
+    """Hold an exclusive flock on run/bridge.lock for the life of the process."""
+    import fcntl
+    path = home / "run" / "bridge.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh
 
 
 def main(argv=None) -> int:
@@ -837,6 +936,13 @@ def main(argv=None) -> int:
         print("slack-bridge: slack_sdk is not installed; run scripts/install.sh", file=sys.stderr)
         return 3
 
+    lock = acquire_instance_lock(home)
+    if lock is None:
+        print(f"slack-bridge: another bridge is already running for {home} "
+              "(run/bridge.lock is held); not starting a second one", file=sys.stderr)
+        return 5
+    secrets = common.take_secrets()
+
     pidfile = home / "run" / "bridge.pid"
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     pidfile.write_text(f"{os.getpid()}\n", encoding="utf-8")
@@ -850,7 +956,8 @@ def main(argv=None) -> int:
 
     atexit.register(_cleanup_pidfile)
 
-    bridge = Bridge(home)
+    bridge = Bridge(home, secrets=secrets)
+    bridge.instance_lock = lock
     signal.signal(signal.SIGTERM, bridge.shutdown)
     signal.signal(signal.SIGINT, bridge.shutdown)
     try:

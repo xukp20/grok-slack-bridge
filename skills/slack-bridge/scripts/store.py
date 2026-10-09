@@ -364,6 +364,13 @@ class Store:
                             "WHERE thread_key=?", (self.now(), self.now(), key))
         return self.thread(key)
 
+    def reset_bot_turns(self, key: str) -> dict | None:
+        """A human posted in the thread: bot-to-bot exchanges start counting from zero."""
+        with self.lock:
+            self.db.execute("UPDATE threads SET bot_turns=0, updated_at=? WHERE thread_key=? "
+                            "AND bot_turns>0", (self.now(), key))
+        return self.thread(key)
+
     def new_task(self, key: str, reason: str = "owner started a new task") -> dict | None:
         with self.lock:
             self.db.execute("UPDATE threads SET task_id=task_id+1, bot_turns=0, last_bot_at=0, "

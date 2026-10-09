@@ -103,6 +103,51 @@ class BotLoopTests(unittest.TestCase):
         self.assertEqual(t["state"], "active")
         self.assertEqual(self.b._handle_envelope(bot_msg("again", ts="1700004004.000100")), "queued")
 
+    def test_human_message_resets_consecutive_bot_turns(self):
+        self._queue_mention()
+        self.assertEqual(self.b._handle_envelope(bot_msg("1", ts="1700005001.000100")), "queued")
+        self.assertEqual(self.b._handle_envelope(bot_msg("2", ts="1700005002.000100")), "queued")
+        self.assertIn("max_bot_turns", self.b._handle_envelope(bot_msg("3", ts="1700005003.000100")))
+        # the owner posts in the thread without addressing the bot: counter resets
+        self.assertIn("trigger=mention", self.b._handle_envelope(
+            env("ok carry on", channel="C0CHAN", thread_ts=THREAD, channel_type="channel",
+                ts="1700005004.000100")))
+        t = self.b.store.find_thread("C0CHAN", THREAD)
+        self.assertEqual(t["bot_turns"], 0)
+        self.assertEqual(t["task_id"], 1)  # not a new task, just a reset
+        self.assertEqual(self.b._handle_envelope(bot_msg("4", ts="1700005005.000100")), "queued")
+        self.assertEqual(self.b._handle_envelope(bot_msg("5", ts="1700005006.000100")), "queued")
+        self.assertIn("max_bot_turns", self.b._handle_envelope(bot_msg("6", ts="1700005007.000100")))
+
+    def test_any_human_resets_but_bots_never_do(self):
+        self._queue_mention()
+        self.b._handle_envelope(bot_msg("1", ts="1700006001.000100"))
+        self.b._handle_envelope(bot_msg("2", ts="1700006002.000100"))
+        # a non-owner human (refused access) still breaks the bot-to-bot chain
+        self.b._handle_envelope(env("hey", channel="C0CHAN", thread_ts=THREAD, channel_type="channel",
+                                    user=OTHER, ts="1700006003.000100"))
+        self.assertEqual(self.b.store.find_thread("C0CHAN", THREAD)["bot_turns"], 0)
+        # human messages elsewhere do not reset this thread
+        self.b._handle_envelope(bot_msg("3", ts="1700006004.000100"))
+        self.b._handle_envelope(env("other thread", channel="C0CHAN", thread_ts="1700000000.000100",
+                                    channel_type="channel", ts="1700006005.000100"))
+        self.assertEqual(self.b.store.find_thread("C0CHAN", THREAD)["bot_turns"], 1)
+
+    def test_unscoped_entry_without_cap_or_expiry_covers_any_thread(self):
+        b = make_bridge(bot_access="allowlist", max_bot_turns=4, bot_cooldown_seconds=0,
+                        bot_allowlist=[{"label": "dot", "user_id": DOT_USER, "bot_id": DOT_BOT,
+                                        "app_id": DOT_APP}])
+        for i, (ch, th) in enumerate([("C0CHAN", "1700007000.000100"), ("C0OTHER", None)]):
+            e = env(f"<@{BOT_USER}> hi", user=DOT_USER, bot=DOT, channel=ch, thread_ts=th,
+                    channel_type="channel", ts=f"170000700{i + 1}.000100")
+            self.assertEqual(b._handle_envelope(e), "queued")
+        # the global safety cap still applies to consecutive bot turns
+        for i in range(2, 6):
+            out = b._handle_envelope(env(f"<@{BOT_USER}> {i}", user=DOT_USER, bot=DOT,
+                                         channel="C0CHAN", thread_ts="1700007000.000100",
+                                         channel_type="channel", ts=f"170000710{i}.000100"))
+        self.assertIn("max_bot_turns", out)
+
     def test_non_owner_new_is_not_a_command(self):
         self._queue_mention()
         # OTHER saying "new" is just a normal (ignored under mention trigger) message

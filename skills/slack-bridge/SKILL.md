@@ -31,7 +31,8 @@ posts the answer as the bot and closes the operation.
   `needs-reconciliation` after a restart (never replayed), followed threads
   are caught up after reconnects.
 - **Triggers & loops**: `trigger` `mention|thread_follow|all`;
-  `max_bot_turns`, `bot_cooldown_seconds`; `stop`/`停` stops a thread
+  `max_bot_turns` (consecutive bot turns per thread; any human message resets),
+  `bot_cooldown_seconds`; `stop`/`停` stops a thread
   (checked before enqueue, before submit and in `reply.sh`), owner `new`
   resets; bot threads stay paused after restarts.
 - **Session routing** ([docs/session-model.md](../../docs/session-model.md)):

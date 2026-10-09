@@ -333,6 +333,11 @@ class Bridge:
         """Decide and act on a message whose receipt is in state 'received'."""
         thread = self.store.ensure_thread(tkey, msg.team_id or self.ident.team_id, msg.channel,
                                           msg.root_ts, self.ident.app_id)
+        if msg.actor_type == "human" and int(thread.get("bot_turns") or 0):
+            # Loop protection counts only consecutive bot turns: any human message in the
+            # thread (addressed to the bot or not, allowed or not) resets the counter.
+            thread = self.store.reset_bot_turns(tkey) or thread
+            log.info("bot turn counter reset in %s by human %s", tkey, msg.actor)
         log.info("event %s %s channel=%s actor=%s(%s) ts=%s len=%d%s%s",
                  msg.op_id, msg.event_type, msg.channel, msg.actor, msg.actor_type, msg.ts,
                  len(msg.text), " catchup" if msg.catchup else "",
@@ -415,8 +420,8 @@ class Bridge:
                 limit = min(limit, int(verdict.bot_entry["max_turns"]))
             turns = int(thread.get("bot_turns") or 0)
             if turns >= limit:
-                return Decision("ignore", f"max_bot_turns reached ({turns}/{limit}); the owner can "
-                                "say 'new' to start a new task", verdict=verdict)
+                return Decision("ignore", f"max_bot_turns reached ({turns}/{limit} consecutive bot "
+                                "turns); any human message in the thread resets it", verdict=verdict)
             last = float(thread.get("last_bot_at") or 0)
             cooldown = float(policy["bot_cooldown_seconds"])
             if last and self.now() - last < cooldown:

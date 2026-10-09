@@ -200,7 +200,7 @@ most important ones:
 | `user_denylist` / `bot_denylist` | `[]` | always refused |
 | `channel_overrides` | `{}` | per-channel settings that can only tighten |
 | `trigger` | `mention` | `mention` \| `thread_follow` \| `all` |
-| `max_bot_turns` / `bot_cooldown_seconds` | `4` / `10` | bot loop limits per thread task |
+| `max_bot_turns` / `bot_cooldown_seconds` | `4` / `10` | bot loop limits: consecutive bot turns per thread (a human message resets) / min gap |
 | `report_channel` / `report_thread_ts` | `""` | where restarts and webhook failures are reported |
 | `agent_sessions` | `true` | Slack agent view when available |
 | `session_routing` | `{"default": "main", "channels": {}}` | who handles a channel: the main conversation, or a dedicated agent (`target: dedicated` + env var **names** for its webhook) |

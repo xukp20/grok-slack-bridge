@@ -168,6 +168,10 @@ Bot 默认被拒绝。要试点某个 Bot，在 `bot_allowlist` 里写它真实�
                    "max_turns": 3}]
 ```
 
+不写 `channels` / `threads` / `expires_at` / `max_turns` 即表示任何频道/线程、永不过期。
+防循环：`max_bot_turns`（默认 4）只限制同一线程里**连续**的 Bot 消息数；线程里只要有人类发言就清零，
+所以 Bot 偶尔 @ Grok Bot 不受影响，只拦截没有人类插话的 Bot 互相来回。
+
 在 Slack 里，被允许的人可以在线程里说 `stop` / `停` / `停止`；所有者还可以说
 `new` / `新任务`（开始新任务并重置 Bot 轮数）、`resume`（恢复已停止/暂停的线程；
 在正常进行中的线程里"继续"只是普通消息）、`status` / `状态`；`help` / `帮助` 显示说明。

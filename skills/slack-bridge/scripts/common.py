@@ -225,7 +225,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "channel_overrides": {},            # {"C…": {...}} may only tighten access
     # Triggers and loop control (stage 3)
     "trigger": "mention",               # mention | thread_follow | all (DMs always count)
-    "max_bot_turns": 4,                 # forwarded bot messages per thread task
+    "max_bot_turns": 4,                 # consecutive forwarded bot messages per thread (a human message resets)
     "bot_cooldown_seconds": 10,         # min gap between forwarded bot messages in a thread
     "command_words": {
         "stop": ["stop", "停", "停止", "别回了"],

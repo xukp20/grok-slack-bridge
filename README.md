@@ -71,7 +71,7 @@ routes we compared and when each is the better choice.
 | Socket Mode | Outbound WebSocket only; no public URL, works behind NAT |
 | Access control | One check for DMs, mentions, followed threads, `/grok`, buttons and Stop: workspace + app verified, owner-only by default, user/bot allowlists and denylists, scoped and expiring bot entries, per-channel overrides that only tighten |
 | Reliable delivery | Every message recorded in SQLite; persisted dedup; operation state machine; webhook timeouts never blindly resent; in-flight work reconciled, not replayed, after restarts; thread catch-up after reconnects |
-| Triggers and loop control | `mention` / `thread_follow` / `all`; bot turn limits and cooldown per thread task; `stop` / `停` stops a task everywhere, the owner's `new` resets it |
+| Triggers and loop control | `mention` / `thread_follow` / `all`; bot loop limit counts only consecutive bot turns in a thread (any human message resets it) plus a cooldown; `stop` / `停` stops a task everywhere, the owner's `new` resets it |
 | Easy replies | `reply.sh --op` posts Markdown as the bot, threads correctly, splits long messages, closes the operation; `--no-reply` for deliberate silence |
 | Safe output | `@channel`/`@here` never ping, stray mentions rendered inert, bounded rate-limited outbox, fixed error texts |
 | Monitoring | Process health separate from task state; restarts, repeated webhook failures and long disconnects reported to a channel |
@@ -248,6 +248,12 @@ real IDs and can be limited to channels/threads, expire, and cap turns:
                    "threads": ["C0…:1791460290.248329"], "expires_at": "2026-10-09T09:00:00+08:00",
                    "max_turns": 3}]
 ```
+
+Omit `channels` / `threads` / `expires_at` / `max_turns` to allow the bot
+anywhere the app is, with no expiry. Loop protection: `max_bot_turns`
+(default 4) caps *consecutive* forwarded bot messages in one thread; any
+human message in that thread resets the count, so a bot addressing Grok Bot
+now and then is never blocked, only bots ping-ponging with no human in between.
 
 In Slack, anyone allowed can say `stop` / `停` in a thread; the owner can say
 `new` (new task, bot turn counter reset), `resume`, `status`; `help` lists

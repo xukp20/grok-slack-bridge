@@ -63,7 +63,7 @@ Find them in a message's raw event (`user`, `bot_id`, `app_id`) or with
   accepted; omit for anywhere.
 - `expires_at`: ISO 8601 with a UTC offset, or epoch seconds. An
   unparseable value counts as already expired (fail closed).
-- `max_turns` caps `max_bot_turns` for this bot.
+- `max_turns` caps `max_bot_turns` for this bot (omit for the global cap).
 - Bots can never use `/grok`, buttons, or text commands.
 
 `channel_overrides["C…"]` may only make things **stricter**:
@@ -87,7 +87,7 @@ and writes explicit keys with the deny-by-default values.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `trigger` | `mention` | `mention`: DMs and @mentions only. `thread_follow`: also every later message in a thread where the bot was mentioned (no new mention needed). `all`: every message in channels the bot is in. DMs and `/grok` always count |
-| `max_bot_turns` | `4` | forwarded **bot** messages per thread task; then bots are ignored until the owner says `new` |
+| `max_bot_turns` | `4` | **consecutive** forwarded bot messages in one thread; any human message in that thread resets the count (so does the owner's `new`). Once reached, bots are ignored there until a human posts |
 | `bot_cooldown_seconds` | `10` | minimum gap between forwarded bot messages in one thread; extra messages are delayed (not dropped) |
 | `command_words` | see example | words that act as commands when they are the whole message (mention allowed) |
 | `stop_message`, `new_task_message`, `resume_message`, `help_text` | … | fixed replies |

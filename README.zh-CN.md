@@ -202,8 +202,16 @@ Bot 默认被拒绝。要试点某个 Bot，在 `bot_allowlist` 里写它真实�
 如何用 `start.sh` / `restart.sh` 重启（需要 shell 里有 4 个环境变量；在 Grok Bot 的云端
 电脑上，密钥会自动注入新进程），常见故障（Token 轮换后 `invalid_auth`、两个转发程序分走消息、
 例行任务密钥更换后 webhook 401、Socket 反复断线）及解决办法，以及可定时运行的自愈脚本
-`ensure-running.sh`（附 Grok Bot 例行任务提示词和 cron 写法），见
-[docs/operations.md](docs/operations.md)（英文）。
+`ensure-running.sh`（附 Grok Bot 例行任务提示词和 cron 写法），以及云端电脑空闲时被冻结、
+恢复后消息延迟送达的情况，见 [docs/operations.md](docs/operations.md)（英文）。
+
+健康检查例行任务的提示词见
+[references/health-check-routine-prompt.md](skills/slack-bridge/references/health-check-routine-prompt.md)。
+推荐默认频率：白天每小时一次（例如北京时间 8 点到 24 点：`CRON_TZ=Asia/Shanghai 4 8-23 * * *`），
+因为每次运行都会消耗额度，每半小时一次大约翻倍且多是误报。电脑刚从冻结中恢复时心跳看起来过期，
+检查可能会重启转发程序；重启后正常属于已知误报，不通知主人，只有重启后仍不正常、脚本失败或被拦截、
+或出现需要处理的新问题时才转交主会话。所有路由（主会话和各频道专属 Agent）共用同一个转发程序，
+一个健康检查就够了。
 
 ## 切换 Agent、账号或 Token
 

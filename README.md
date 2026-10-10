@@ -319,8 +319,14 @@ automatically (the 👀 receipt reaction works either way).
 
 Restarts, crashes and recovery (what happens when the machine reboots, how
 to check and restart, common failures, and the self-healing
-`ensure-running.sh` for a periodic routine or cron):
-[docs/operations.md](docs/operations.md).
+`ensure-running.sh` for a periodic routine or cron, and how a box that is
+frozen when idle delays messages): [docs/operations.md](docs/operations.md).
+For the scheduled health-check routine use
+[references/health-check-routine-prompt.md](skills/slack-bridge/references/health-check-routine-prompt.md):
+hourly during waking hours (`CRON_TZ=Asia/Shanghai 4 8-23 * * *`) is the
+recommended default, since each run costs usage; it stays silent when a
+restart ends healthy (a known false alarm after the box resumes) and one
+check covers every route, dedicated channel agents included.
 
 ## Safety Boundaries
 
@@ -347,7 +353,7 @@ skills/slack-bridge/
                            webhook.py, outbox.py, slackctl.py, common.py, *.sh helpers
   references/              configuration, config pitfalls, payload v2, setup, reconnect, runtime README template,
                            inbox routine prompt (silent handoff), dedicated agent persona + routine prompt,
-                           channel memory template, dispatcher guideline
+                           channel memory template, dispatcher guideline, health-check routine prompt
   config.example.json      all config keys with defaults
 docs/
   slack-connection-options.md   alternatives we evaluated and why this design

@@ -170,6 +170,11 @@ widen it.
   conversational channels where follow-ups correct the request. `queue`
   suits channels of independent requests and bot-to-bot channels, where
   merging two bots' turns would be wrong.
+- **Health check**: none needed for the dedicated agent. The bridge is
+  shared by every route, so the owner's single
+  [health-check routine](../skills/slack-bridge/references/health-check-routine-prompt.md)
+  covers this channel too. Do not create a second one; two checks only
+  double the cost and can restart the bridge twice.
 - **Stop / new / resume**, receipts, dedup, busy-retry and catch-up work
   the same for every route. `stop` in the channel marks the thread stopped,
   and the dedicated agent's `reply.sh` then exits 3.

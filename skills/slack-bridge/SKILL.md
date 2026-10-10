@@ -157,7 +157,13 @@ check for a periodic routine or cron: exit 0 healthy/recovered, 1 failed,
 2 blocked by missing env. For failures (`invalid_auth` after rotation, two
 bridges splitting events, webhook 401 after a routine key change, socket
 disconnect loops), the suggested routine prompt and cron lines, see
-[docs/operations.md](../../docs/operations.md). Never restart a healthy bridge
+[docs/operations.md](../../docs/operations.md). Health-check routine prompt:
+[references/health-check-routine-prompt.md](references/health-check-routine-prompt.md);
+default schedule hourly in waking hours (`CRON_TZ=Asia/Shanghai 4 8-23 * * *`;
+each run costs usage). One check covers every route. A Grok Bot box is
+frozen when idle: messages arrive late after it resumes, the heartbeat looks
+stale for ~30 s, and a restart that ends healthy is a false alarm, so the
+routine must not notify the owner about it. Never restart a healthy bridge
 without a reason: messages sent during the few seconds without a connection
 can be missed (followed threads are caught up after reconnecting; DMs and
 new mentions are not). After a restart,

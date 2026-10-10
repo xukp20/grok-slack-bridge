@@ -9,6 +9,7 @@ with yours (`$SLACK_BRIDGE_HOME`).
 | --- | --- | --- |
 | **Machine/box restarts** | The bridge process is gone. `run/bridge.pid` may remain but is ignored once the PID is dead. Slack shows the bot as online (`always_online`) but nobody receives events. | `start.sh` (or let `ensure-running.sh` do it) |
 | **Bridge crashes or is killed** | Same as above; the last lines of `logs/bridge.log` usually show why. | `start.sh` |
+| **Box frozen while idle (Grok Bot box)** | The bridge is suspended, not killed; messages arrive late after the box resumes, and the heartbeat looks stale for a few seconds after resume. | None needed; it reconnects in ~30 s ([details](#box-freeze-and-resume-grok-bot-box)) |
 | **Network blip / Slack refreshes the socket** | `slack_sdk` reconnects automatically; the heartbeat may briefly show `connected=false`. | None needed |
 | **Process alive but hung** | `run/heartbeat.json` stops updating (it is rewritten every 30 s). | `restart.sh` / `ensure-running.sh` |
 | **Agent shell or chat session ends** | No effect: `start.sh` detaches with `setsid nohup`. | None |
@@ -152,21 +153,20 @@ happened), `--stale-seconds N`. Every run appends one line to
 
 ### Suggested Grok Bot routine
 
-Create a scheduled routine, e.g. **hourly, Monday–Friday** (add a run at
-09:00 on weekends if you want), with this prompt:
+Create a **scheduled** routine in the owner's main agent with the prompt in
+[references/health-check-routine-prompt.md](../skills/slack-bridge/references/health-check-routine-prompt.md).
+Recommended default: **hourly during waking hours**, e.g.
+`CRON_TZ=Asia/Shanghai 4 8-23 * * *` (08:04 … 23:04 owner time). Each run is
+a full agent turn and costs usage; 30-minute checks roughly double that and,
+on a box that is frozen when idle, mostly produce false alarms
+([below](#box-freeze-and-resume-grok-bot-box)). The prompt finishes silently
+when the bridge is healthy or was restarted and is healthy again, and only
+hands off to the main conversation when it is still unhealthy, the script
+fails or is blocked, or there is something new the owner must fix.
 
-> Slack bridge health check. On the box, run
-> `/workspace/slack-bot/scripts/ensure-running.sh --quiet`.
-> - No output, or a line with `action=started` / `action=restarted`: the bridge
->   is fine (or was recovered). Finish without notifying me, except mention a
->   restart in one short sentence.
-> - Exit code 1 or 2 (`action=failed` / `action=blocked`): run
->   `/workspace/slack-bot/scripts/doctor.sh` and
->   `/workspace/slack-bot/scripts/status.sh 30`, look up the matching row in
->   `/workspace/grok-slack-bridge/docs/operations.md` ("Common failures and
->   fixes"), and tell me what failed and the exact fix I need to do (for
->   example, which secret to update).
-> Never print, copy or store token values, and do not post anything in Slack.
+One health check covers every route: the main conversation and all
+dedicated channel agents share the same bridge process, so dedicated agents
+need no health check of their own.
 
 The routine's shell receives the box secrets, so `ensure-running.sh` can
 start the bridge without extra setup.
@@ -185,3 +185,33 @@ them into the crontab or a file in the install directory):
 Without the variables, cron runs end with `action=blocked` in
 `logs/ensure-running.log` and change nothing. (The Grok Bot box has no
 cron daemon by default; use the routine there.)
+
+## Box freeze and resume (Grok Bot box)
+
+A Grok Bot box is **frozen when nobody is using it** and resumed when an
+agent turn or routine run needs it. The bridge process is suspended with it;
+it is not killed. Consequences:
+
+- **While frozen, nothing is received.** Messages sent then reach the bridge
+  only after the box resumes (seen: 5–12 minutes late). Slack redelivers
+  some events after the socket comes back; for threads the bridge follows,
+  catch-up (`catchup_window_hours`) reads what was missed once it
+  reconnects (`catchup: true` in the payload). DMs and new top-level
+  mentions are not caught up, so a message can occasionally be lost; ask
+  the user to resend, or read it with `slackctl.sh thread`.
+- **Right after a resume the bridge looks unhealthy:** `run/heartbeat.json`
+  is as old as the freeze and the socket may show `connected=false`.
+  `slack_sdk` reconnects by itself, usually within ~30 s.
+- **A health check that runs in those first seconds** sees the stale
+  heartbeat and restarts a bridge that would have recovered on its own. The
+  restart is harmless (pending work is reconciled, not replayed), but it is
+  a false alarm, which is why the
+  [health-check prompt](../skills/slack-bridge/references/health-check-routine-prompt.md)
+  must not notify the owner about a restart that ends healthy. Look at
+  `logs/ensure-running.log` and the gap in `logs/bridge.log` timestamps to
+  confirm a freeze rather than a hang.
+- **Late answers are expected.** An answer to a message that arrived late
+  may cross with the user's "did you see this?"; check `slackctl.sh ops
+  list` and the thread before replying twice.
+- For a bot that must be reachable 24/7 with no delay, run the bridge on an
+  always-on host (plain cron alternative above) instead of the box.

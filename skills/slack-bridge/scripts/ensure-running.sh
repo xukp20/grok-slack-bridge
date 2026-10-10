@@ -29,6 +29,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
+# The lock lives on fd 9 for the rest of this run. Every child that can launch
+# the bridge is run with 9>&- so the long-lived bridge never inherits it
+# (an inherited fd would hold the lock forever and every later check would
+# exit 3). start.sh also closes stray inherited fds before launching.
 exec 9>"$RUN_DIR/ensure-running.lock"
 if ! flock -n 9; then
   echo "ensure-running: another check is in progress"; exit 3
@@ -82,14 +86,14 @@ fi
 
 if [[ -n "$pid" ]]; then
   if (( dry_run )); then report would-restart "pid=$pid $reason"; exit 0; fi
-  if "$CODE_DIR/restart.sh" >>"$ENSURE_LOG" 2>&1; then
+  if "$CODE_DIR/restart.sh" 9>&- >>"$ENSURE_LOG" 2>&1; then
     report restarted "was pid=$pid ($reason); now pid=$(running_pid)"; exit 0
   fi
   report failed "restart after: $reason; see $LOGFILE"; exit 1
 fi
 
 if (( dry_run )); then report would-start "bridge not running"; exit 0; fi
-if "$CODE_DIR/start.sh" >>"$ENSURE_LOG" 2>&1; then
+if "$CODE_DIR/start.sh" 9>&- >>"$ENSURE_LOG" 2>&1; then
   report started "pid=$(running_pid)"; exit 0
 fi
 report failed "start failed; see $LOGFILE"; exit 1

@@ -28,7 +28,16 @@ fi
 offset=$( [[ -f "$LOGFILE" ]] && stat -c %s "$LOGFILE" || echo 0 )
 
 # setsid + nohup: survive the launching shell/session ending.
-setsid nohup "$PY" -u "$CODE_DIR/bridge.py" --home "$BRIDGE_HOME" >>"$LOGFILE" 2>&1 </dev/null &
+# The subshell first closes every inherited fd above 2 (e.g. a caller's flock
+# fd such as ensure-running.lock), so the long-lived bridge cannot hold a
+# caller's lock. 255 is bash's own script fd and is left alone.
+(
+  for fd_path in /proc/self/fd/*; do
+    fd="${fd_path##*/}"
+    [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 && fd != 255 )) && { eval "exec ${fd}>&-" 2>/dev/null || true; }
+  done
+  exec setsid nohup "$PY" -u "$CODE_DIR/bridge.py" --home "$BRIDGE_HOME" >>"$LOGFILE" 2>&1 </dev/null
+) &
 launcher=$!
 
 for _ in $(seq 1 40); do

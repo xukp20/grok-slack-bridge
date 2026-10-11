@@ -102,6 +102,7 @@ class Bridge:
         self.delivery_thread: threading.Thread | None = None
         self.denied_at: dict[str, float] = {}
         self.granted_scopes: set[str] | None = None  # from auth.test x-oauth-scopes; None = unknown
+        self.catchup_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None:
@@ -234,7 +235,7 @@ class Bridge:
             self.pool.submit(self.catch_up_safe)
             if self.disconnect_reported:
                 self.disconnect_reported = False
-                self.report("reconnected", "Bridge reconnected to Slack; catching up on followed threads.",
+                self.report("reconnected", "Bridge reconnected to Slack; catching up on followed threads, DMs and channels.",
                             force=True)
         limit = float(self.cfg.get("report_disconnect_seconds", 300))
         if not connected and not self.disconnect_reported and now - self.last_connected_at > limit:
@@ -274,7 +275,7 @@ class Bridge:
 
         # Ack first, always, so Slack does not retry. The receipt is persisted
         # next; a crash between ack and receipt is the only loss window, and
-        # thread catch-up covers followed threads.
+        # catch-up re-reads followed threads, DMs and channels.
         if req.type == "slash_commands":
             # Decide synchronously so the ack can carry the (ephemeral) answer.
             try:
@@ -918,31 +919,157 @@ class Bridge:
         try:
             self.catch_up()
         except Exception:
-            log.exception("thread catch-up failed")
+            log.exception("catch-up failed")
+
+    def _cfg(self, key: str):
+        return self.cfg.get(key, common.DEFAULT_CONFIG.get(key))
 
     def catch_up(self) -> dict:
-        """Re-read followed threads past their cursor after (re)connecting.
+        """After (re)connecting: re-read followed threads past their cursor, then the
+        top-level history of DMs and channels past their high-water mark.
 
-        A failed or partial read marks the thread catchup_ok=0 and leaves the
-        cursor where it was; it never counts as "no new messages".
+        A failed or partial read marks the thread catchup_ok=0 (or leaves the
+        channel mark) where it was; it never counts as "no new messages".
+        Every message found goes through the same pipeline as a live event
+        (receipt + dedup by channel:ts, access, trigger, loop limits, routing),
+        so anything already received live is a duplicate and is not forwarded twice.
         """
         summary = {"threads": 0, "messages": 0, "failed": 0}
-        if self.web is None or not self.cfg.get("catchup_enabled", True):
+        if self.web is None or not self._cfg("catchup_enabled"):
             return summary
-        window = float(self.cfg.get("catchup_window_hours", 24)) * 3600
-        for t in self.store.following_threads(time.time() - window):
-            summary["threads"] += 1
-            oldest = t["cursor_ts"] or t["root_ts"]
-            cursor, msgs, ok = None, [], True
+        with self.catchup_lock:
+            self.cfg = common.load_config(self.home)
+            window = float(self._cfg("catchup_window_hours")) * 3600
+            for t in self.store.following_threads(time.time() - window):
+                summary["threads"] += 1
+                oldest = t["cursor_ts"] or t["root_ts"]
+                cursor, msgs, ok = None, [], True
+                for _page in range(20):
+                    try:
+                        kwargs = {"channel": t["channel"], "ts": t["root_ts"], "oldest": oldest,
+                                  "limit": 200, "inclusive": False}
+                        if cursor:
+                            kwargs["cursor"] = cursor
+                        resp = self.web.conversations_replies(**kwargs)
+                    except Exception as exc:
+                        log.warning("catch-up read failed for %s: %s", t["thread_key"],
+                                    common.slack_error_code(exc))
+                        ok = False
+                        break
+                    msgs.extend(resp.get("messages") or [])
+                    cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+                    if not resp.get("has_more") or not cursor:
+                        break
+                else:
+                    ok = False  # too many pages: treat as incomplete
+                if not ok:
+                    summary["failed"] += 1
+                    self.store.update_thread(t["thread_key"], catchup_ok=0)
+                    continue
+                ctype = "im" if t["channel"].startswith("D") else "channel"
+                for m in sorted(msgs, key=lambda m: storemod._ts_key(m.get("ts"))):
+                    if storemod._ts_key(m.get("ts")) <= storemod._ts_key(oldest):
+                        continue
+                    env = events.catchup_envelope(m, t["channel"], ctype, self.ident)
+                    outcome = self._handle_envelope(env)
+                    if outcome not in ("duplicate",) and not outcome.startswith("noise"):
+                        summary["messages"] += 1
+                self.store.update_thread(t["thread_key"], catchup_ok=1)
+            if self._cfg("catchup_channels"):
+                summary.update(self.catch_up_channels(window))
+        log.info("catch-up: %s", summary)
+        return summary
+
+    # Channel (top-level) catch-up ------------------------------------------
+    def catchup_channels_list(self) -> tuple[list[tuple[str, str]], bool]:
+        """[(channel, channel_type)] to scan: DMs and channels the bot is a member of
+        (users.conversations), plus route-configured channels. Second value: whether
+        the membership listing worked (if not, channels with recent activity are used)."""
+        found: dict[str, str] = {}
+        listed = True
+        cursor = None
+        try:
             for _page in range(20):
+                kwargs = {"types": "im,public_channel,private_channel", "exclude_archived": True,
+                          "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = self.web.users_conversations(**kwargs)
+                for ch in resp.get("channels") or []:
+                    cid = ch.get("id") or ""
+                    if not cid or ch.get("is_archived") or ch.get("is_user_deleted"):
+                        continue
+                    if ch.get("is_im"):
+                        if ch.get("user") in ("USLACKBOT", self.ident.bot_user_id):
+                            continue
+                        found[cid] = "im"
+                    else:
+                        found[cid] = "group" if ch.get("is_private") else "channel"
+                cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+                if not cursor:
+                    break
+                self._catchup_pause()
+        except Exception as exc:
+            listed = False
+            log.warning("catch-up: listing conversations failed (%s); scanning routed and recently "
+                        "active channels only", common.slack_error_code(exc))
+        extra = list(((self.cfg.get("session_routing") or {}).get("channels") or {}).keys())
+        if not listed:
+            extra += self.store.recent_channels(time.time() - float(self._cfg("catchup_window_hours")) * 3600)
+        for cid in extra:
+            if cid and cid not in found:
+                found[cid] = "im" if cid.startswith("D") else "channel"
+        allow = set(self.cfg.get("channel_allowlist") or [])
+        out = [(c, t) for c, t in found.items() if t == "im" or not allow or c in allow]
+        # DMs first (most likely to be addressed to the bot), then channels; stable order.
+        out.sort(key=lambda ct: (ct[1] != "im", ct[0]))
+        return out[: int(self._cfg("catchup_max_channels"))], listed
+
+    def _catchup_pause(self) -> None:
+        delay = float(self._cfg("catchup_request_interval_seconds") or 0)
+        if delay > 0:
+            self.stop_event.wait(delay)
+
+    def catch_up_channels(self, window: float) -> dict:
+        """Read top-level messages newer than each channel's high-water mark.
+
+        Marks live in the state database (meta catchup_hwm:<channel>) and only
+        advance after a complete read whose messages all got a receipt. The first
+        time this runs at all, every channel's mark is seeded to "now" (nothing
+        older is forwarded); a channel seen for the first time later is read back
+        at most catchup_initial_lookback_hours, never before that first run.
+        """
+        out = {"channels": 0, "channel_messages": 0, "channel_failed": 0, "seeded": 0}
+        now = time.time()
+        now_ts = f"{now:.6f}"
+        enabled_at = self.store.meta("catchup_channels_enabled_at")
+        first_run = enabled_at is None
+        if first_run:
+            enabled_at = self.store.meta("catchup_channels_enabled_at", now_ts)
+        channels, listed = self.catchup_channels_list()
+        if not listed:
+            out["listing_failed"] = True
+        lookback = float(self._cfg("catchup_initial_lookback_hours")) * 3600
+        # Never read further back than the catch-up window or the first run.
+        floor = max(f"{now - window:.6f}", enabled_at, key=storemod._ts_key)
+        for channel, ctype in channels:
+            mark = self.store.channel_mark(channel)
+            if first_run:
+                self.store.set_channel_mark(channel, now_ts)
+                out["seeded"] += 1
+                continue
+            out["channels"] += 1
+            oldest = max(mark or f"{now - lookback:.6f}", floor, key=storemod._ts_key)
+            msgs, ok, cursor = [], True, None
+            for _page in range(5):
+                self._catchup_pause()
                 try:
-                    kwargs = {"channel": t["channel"], "ts": t["root_ts"], "oldest": oldest,
-                              "limit": 200, "inclusive": False}
+                    kwargs = {"channel": channel, "oldest": oldest, "limit": 200, "inclusive": False}
                     if cursor:
                         kwargs["cursor"] = cursor
-                    resp = self.web.conversations_replies(**kwargs)
+                    resp = self.web.conversations_history(**kwargs)
                 except Exception as exc:
-                    log.warning("catch-up read failed for %s: %s", t["thread_key"],
+                    log.warning("channel catch-up read failed for %s: %s", channel,
                                 common.slack_error_code(exc))
                     ok = False
                     break
@@ -951,23 +1078,40 @@ class Bridge:
                 if not resp.get("has_more") or not cursor:
                     break
             else:
-                ok = False  # too many pages: treat as incomplete
+                ok = False  # too many pages: incomplete, keep the mark
             if not ok:
-                summary["failed"] += 1
-                self.store.update_thread(t["thread_key"], catchup_ok=0)
+                out["channel_failed"] += 1
                 continue
-            ctype = "im" if t["channel"].startswith("D") else "channel"
+            newest = mark
+            all_ok = True
             for m in sorted(msgs, key=lambda m: storemod._ts_key(m.get("ts"))):
-                if storemod._ts_key(m.get("ts")) <= storemod._ts_key(oldest):
+                ts = m.get("ts") or ""
+                if not ts or storemod._ts_key(ts) <= storemod._ts_key(oldest):
                     continue
-                env = events.catchup_envelope(m, t["channel"], ctype, self.ident)
-                outcome = self._handle_envelope(env)
+                if m.get("thread_ts") and m.get("thread_ts") != ts and m.get("subtype") != "thread_broadcast":
+                    continue  # a reply; thread catch-up handles followed threads
+                env = events.catchup_envelope(m, channel, ctype, self.ident)
+                try:
+                    outcome = self._handle_envelope(env)
+                except Exception:
+                    log.exception("channel catch-up: processing %s:%s failed", channel, ts)
+                    all_ok = False
+                    break
                 if outcome not in ("duplicate",) and not outcome.startswith("noise"):
-                    summary["messages"] += 1
-            self.store.update_thread(t["thread_key"], catchup_ok=1)
-        if summary["messages"] or summary["failed"]:
-            log.info("catch-up: %s", summary)
-        return summary
+                    out["channel_messages"] += 1
+                newest = ts
+            if all_ok:
+                # Nothing newer than what we read can be skipped: the mark only moves to
+                # the newest message actually processed (or stays if there was none).
+                if newest:
+                    self.store.set_channel_mark(channel, newest)
+                elif not mark:
+                    self.store.set_channel_mark(channel, oldest)
+            else:
+                if newest and newest != mark:
+                    self.store.set_channel_mark(channel, newest)
+                out["channel_failed"] += 1
+        return out
 
     # -- agent sessions (Slack agent_view) --------------------------------
     def slack_api(self, method: str, body: dict) -> dict:

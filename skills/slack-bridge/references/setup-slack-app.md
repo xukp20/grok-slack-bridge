@@ -47,8 +47,10 @@ Events: `app_mention`, `message.im`, `message.channels`, `message.groups`,
 (drop them and the scope with `render-manifest --no-agent-view` for a plain
 bot; that also drops `features.app_home.agent_tasks_enabled`).
 
-The channel-message events power `trigger: thread_follow` / `all`, thread
-catch-up after reconnects, and receipts for dedup. With the default
+The channel-message events power `trigger: thread_follow` / `all`, catch-up after reconnects
+(threads via `conversations.replies`; DMs and member channels via
+`users.conversations` + `conversations.history`, which need the `*:read` and
+`*:history` scopes above), and receipts for dedup. With the default
 `trigger: mention`, plain channel messages are recorded and ignored, so the
 bot never acts on a channel uninvited. `/grok` is answered in the user's DM
 (needs `im:write`), after the same access check as everything else.

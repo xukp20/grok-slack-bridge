@@ -38,6 +38,8 @@ class FakeWeb:
     def __init__(self):
         self.calls = []
         self.replies = {}           # (channel, root_ts) -> list of messages or Exception
+        self.history = {}           # channel -> list of top-level messages, Exception or callable
+        self.conversations = []     # users.conversations result (list of channel objects) or Exception
         self.ts = itertools.count(1)
 
     def _rec(self, name, kw):
@@ -81,6 +83,23 @@ class FakeWeb:
             return data(kw)
         return FakeResp(ok=True, messages=data, has_more=False)
 
+    def users_conversations(self, **kw):
+        self._rec("users_conversations", kw)
+        if isinstance(self.conversations, Exception):
+            raise self.conversations
+        return FakeResp(ok=True, channels=list(self.conversations), response_metadata={"next_cursor": ""})
+
+    def conversations_history(self, **kw):
+        self._rec("conversations_history", kw)
+        data = self.history.get(kw["channel"], [])
+        if isinstance(data, Exception):
+            raise data
+        if callable(data):
+            return data(kw)
+        oldest = float(kw.get("oldest") or 0)
+        msgs = [m for m in data if float(m["ts"]) > oldest]
+        return FakeResp(ok=True, messages=sorted(msgs, key=lambda m: -float(m["ts"])), has_more=False)
+
     def api_call(self, method, json=None):
         self._rec("api_call:" + method, json or {})
         return FakeResp(ok=False, error="not_authorized")  # no agent view by default
@@ -107,7 +126,7 @@ class FakePoster:
 def make_home(**cfg):
     home = Path(tempfile.mkdtemp(prefix="bridge-test-"))
     base = {"owner_user_id": OWNER, "team_id": TEAM, "app_id": APP, "bot_user_id": BOT_USER,
-            "agent_sessions": False}
+            "agent_sessions": False, "catchup_request_interval_seconds": 0}
     base.update(cfg)
     (home / "config.json").write_text(json.dumps(base))
     return home

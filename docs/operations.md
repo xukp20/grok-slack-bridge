@@ -14,11 +14,26 @@ with yours (`$SLACK_BRIDGE_HOME`).
 | **Process alive but hung** | `run/heartbeat.json` stops updating (it is rewritten every 30 s). | `restart.sh` / `ensure-running.sh` |
 | **Agent shell or chat session ends** | No effect: `start.sh` detaches with `setsid nohup`. | None |
 
-Messages sent while no bridge is connected are **not** delivered later
-(Slack only retries Socket Mode events briefly). After reconnecting, the
-bridge reads threads it follows (`catchup_window_hours`) and processes each
-missed message once; DMs and new top-level mentions are not caught up. After
-an outage, ask people to resend, or read what was missed with
+Slack does not redeliver Socket Mode events sent while no bridge is
+connected (it only retries briefly). Instead, on startup and after every
+reconnect the bridge **catches up** (`catchup: true` in the payload):
+
+- **followed threads** past their cursor (`conversations.replies`), and
+- **top-level messages in every DM and member channel** (plus route-configured
+  channels) newer than the channel's high-water mark (`users.conversations` +
+  `conversations.history`; marks are `catchup_hwm:<channel>` in the state DB).
+
+Each message found goes through the same decision as a live event (access,
+mention/trigger, bot loop limits, main vs dedicated route); a message that
+was already received live is a duplicate (`channel:ts`) and is not
+forwarded again. The very first catch-up after this feature is deployed only
+seeds every mark to "now"; a channel seen later for the first time is read
+back at most `catchup_initial_lookback_hours` (6 h), and nothing older than
+`catchup_window_hours` (24 h) is ever read. A failed or rate-limited read
+keeps the mark and is retried at the next reconnect. The log line
+`catch-up: {'threads': …, 'channels': …, 'channel_messages': …}` shows each
+run. Still not caught up: replies in threads the bot does not follow, and
+anything older than the window; read those with
 `scripts/slackctl.sh thread --channel <D…|C…>` (recent history).
 
 **Each Slack message starts a separate routine run.** Runs overlap when
@@ -193,12 +208,13 @@ agent turn or routine run needs it. The bridge process is suspended with it;
 it is not killed. Consequences:
 
 - **While frozen, nothing is received.** Messages sent then reach the bridge
-  only after the box resumes (seen: 5–12 minutes late). Slack redelivers
-  some events after the socket comes back; for threads the bridge follows,
-  catch-up (`catchup_window_hours`) reads what was missed once it
-  reconnects (`catchup: true` in the payload). DMs and new top-level
-  mentions are not caught up, so a message can occasionally be lost; ask
-  the user to resend, or read it with `slackctl.sh thread`.
+  only after the box resumes (seen: 5–12 minutes late), and events sent
+  while the socket was down are often dropped by Slack. Catch-up fills the
+  gap once the bridge reconnects or is restarted: followed threads, plus new
+  top-level DMs and channel @mentions newer than each channel's high-water
+  mark (see above), each forwarded once with `catchup: true`. Example seen
+  before this existed: a DM sent at 08:20 while frozen was lost because the
+  bridge only came back at 09:07 and caught up threads only.
 - **Right after a resume the bridge looks unhealthy:** `run/heartbeat.json`
   is as old as the freeze and the socket may show `connected=false`.
   `slack_sdk` reconnects by itself, usually within ~30 s.

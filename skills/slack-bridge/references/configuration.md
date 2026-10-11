@@ -121,7 +121,11 @@ markers are never treated as control signals.
 | `queued_status_text` | `排队中…` | shown in the agent view while waiting (session stays "processing"; the text uses Slack's legacy `assistant.threads.setStatus`, best effort) |
 | `queued_reaction` | `hourglass_flowing_sand` | ⏳ on the message while waiting, when there is no agent session (empty = none) |
 | `busy_failed_text` | `抱歉，这条消息一直没能送达…请稍后重新发送一次。` | fixed text after the busy retries are used up |
-| `catchup_enabled`, `catchup_window_hours` | `true`, `24` | after a reconnect, read followed threads (`conversations.replies`) and process missed messages once |
+| `catchup_enabled`, `catchup_window_hours` | `true`, `24` | on startup and after every reconnect, read followed threads (`conversations.replies`) and process missed messages once; nothing older than the window is read |
+| `catchup_channels` | `true` | also read top-level messages of every DM and member channel (`users.conversations`, `conversations.history`) and of route-configured channels, newer than the channel's high-water mark (state DB). Same decision as live events; already-received messages are duplicates. The first run only seeds the marks to "now" |
+| `catchup_initial_lookback_hours` | `6` | how far back a channel without a mark (new DM, newly joined channel) is read; never before the first run |
+| `catchup_max_channels` | `100` | at most this many conversations per catch-up (DMs first) |
+| `catchup_request_interval_seconds` | `0.3` | pause between history calls (rate limits); a failed or rate-limited read keeps the mark and is retried on the next reconnect |
 | `retention_days` | `30` | finished receipts older than this are pruned |
 
 Only 401/403 (stale Authorization) and 404/410 (stale URL) fail at once

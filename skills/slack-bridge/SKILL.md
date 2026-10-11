@@ -28,8 +28,10 @@ posts the answer as the bot and closes the operation.
   timeout is `unknown-result` (never blindly resent), "busy" answers
   (400/409/429/5xx except 504, from overlapping routine runs) are retried slowly in
   thread order with "排队中…" shown, in-flight work becomes
-  `needs-reconciliation` after a restart (never replayed), followed threads
-  are caught up after reconnects.
+  `needs-reconciliation` after a restart (never replayed), after startup and
+  every reconnect the bridge catches up followed threads and new top-level
+  messages in DMs and member channels (per-channel high-water mark; same
+  filters as live events; deduped by channel:ts; `catchup: true`).
 - **Triggers & loops**: `trigger` `mention|thread_follow|all`;
   `max_bot_turns` (consecutive bot turns per thread; any human message resets),
   `bot_cooldown_seconds`; `stop`/`停` stops a thread

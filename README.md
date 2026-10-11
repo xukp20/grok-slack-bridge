@@ -70,7 +70,7 @@ routes we compared and when each is the better choice.
 | Standalone bot | Own name/icon, Messages tab for DMs, @mentions in invited channels, `/grok` |
 | Socket Mode | Outbound WebSocket only; no public URL, works behind NAT |
 | Access control | One check for DMs, mentions, followed threads, `/grok`, buttons and Stop: workspace + app verified, owner-only by default, user/bot allowlists and denylists, scoped and expiring bot entries, per-channel overrides that only tighten |
-| Reliable delivery | Every message recorded in SQLite; persisted dedup; operation state machine; webhook timeouts never blindly resent; in-flight work reconciled, not replayed, after restarts; thread catch-up after reconnects |
+| Reliable delivery | Every message recorded in SQLite; persisted dedup; operation state machine; webhook timeouts never blindly resent; in-flight work reconciled, not replayed, after restarts; catch-up after every (re)connect: followed threads plus new top-level DMs and channel @mentions sent while offline (per-channel high-water mark, deduped) |
 | Triggers and loop control | `mention` / `thread_follow` / `all`; bot loop limit counts only consecutive bot turns in a thread (any human message resets it) plus a cooldown; `stop` / `停` stops a task everywhere, the owner's `new` resets it |
 | Easy replies | `reply.sh --op` posts Markdown as the bot, threads correctly, splits long messages, closes the operation; `--no-reply` for deliberate silence |
 | Safe output | `@channel`/`@here` never ping, stray mentions rendered inert, bounded rate-limited outbox, fixed error texts |

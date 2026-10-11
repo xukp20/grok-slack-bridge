@@ -44,7 +44,7 @@ Delivery), so the agent should not expect duplicates; it can still use
 | `operation_id` | string | the bridge's id for this operation (Slack `event_id`, `catchup:C:ts` for catch-up, `cmd:<trigger>` for `/grok`). Pass it back with `--op` |
 | `event_id`, `event_type` | | Slack envelope; `event_type` is `message`, `app_mention` or `slash_command` |
 | `entry` | string | how the message reached the bot: `dm`, `mention`, `thread_follow` (later message in a followed thread), `channel` (`trigger=all`), `slash_command` |
-| `catchup` | bool | `true` when found by reading a followed thread after a reconnect |
+| `catchup` | bool | `true` when found by catch-up after a (re)connect (a followed thread, or a DM/channel's top-level history), i.e. it may be minutes or hours old |
 | `conversation`, `channel` | | `dm`, or the channel type (`channel`, `group`, `mpim`) |
 | `user`, `user_name`, `user_real_name` | string | sender (for bots: the bot's user) |
 | `actor_type` | `"human"` \| `"bot"` | bots only arrive when `bot_access` allows them |

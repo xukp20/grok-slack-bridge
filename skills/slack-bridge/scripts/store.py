@@ -495,6 +495,34 @@ class Store:
             row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
+    # -- channel catch-up high-water marks -------------------------------------
+    def channel_mark(self, channel: str) -> str:
+        """Newest top-level ts already read in this channel by catch-up ('' = never)."""
+        return self.meta(f"catchup_hwm:{channel}") or ""
+
+    def set_channel_mark(self, channel: str, ts: str) -> str:
+        """Advance (never rewind) the channel's high-water mark."""
+        with self.lock:
+            cur = self.channel_mark(channel)
+            if ts and _ts_key(ts) > _ts_key(cur):
+                self.meta(f"catchup_hwm:{channel}", ts)
+                return ts
+            return cur
+
+    def channel_marks(self) -> dict[str, str]:
+        with self.lock:
+            rows = self.db.execute("SELECT key, value FROM meta WHERE key LIKE 'catchup_hwm:%'").fetchall()
+        return {r["key"].split(":", 1)[1]: r["value"] for r in rows}
+
+    def recent_channels(self, since: float) -> list[str]:
+        """Channels with receipts or threads updated since `since` (listing fallback)."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT channel FROM receipts WHERE updated_at>=? AND channel IS NOT NULL "
+                "AND channel!='' UNION SELECT DISTINCT channel FROM threads WHERE updated_at>=? "
+                "AND channel IS NOT NULL AND channel!=''", (since, since)).fetchall()
+        return sorted(r["channel"] for r in rows)
+
     def meta_pop(self, key: str) -> str | None:
         """Read and delete a meta value."""
         with self.lock:

@@ -294,6 +294,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "app_id": "",
     "catchup_enabled": True,
     "catchup_window_hours": 24,
+    # Channel catch-up: after (re)connecting, also read top-level messages in DMs and
+    # channels the bot is in, newer than a per-channel high-water mark.
+    "catchup_channels": True,
+    "catchup_initial_lookback_hours": 6,   # channel seen for the first time (never before enabling)
+    "catchup_max_channels": 100,
+    "catchup_request_interval_seconds": 0.3,
     "retention_days": 30,
 }
 

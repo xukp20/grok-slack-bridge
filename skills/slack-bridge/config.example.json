@@ -90,5 +90,9 @@
   "app_id": "",
   "catchup_enabled": true,
   "catchup_window_hours": 24,
+  "catchup_channels": true,
+  "catchup_initial_lookback_hours": 6,
+  "catchup_max_channels": 100,
+  "catchup_request_interval_seconds": 0.3,
   "retention_days": 30
 }

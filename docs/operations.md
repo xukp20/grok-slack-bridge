@@ -90,7 +90,7 @@ Files:
 | Path | Contents |
 | --- | --- |
 | `logs/bridge.log` | bridge log (rotated to `bridge.log.1` above 5 MB at start); metadata only, no message text by default |
-| `logs/ensure-running.log` | one line per `ensure-running.sh` run (`action=none/started/restarted/blocked/failed`) |
+| `logs/ensure-running.log` | one line per `ensure-running.sh` run (`action=none/reinstalled/started/restarted/blocked/failed`) |
 | `run/bridge.pid` | PID of the running bridge |
 | `run/bridge.lock` | held (flock) by the running bridge; a second bridge for the same install refuses to start |
 | `run/heartbeat.json` | `heartbeat_at`, `connected`, `last_connected_at`, event counters, operations by state |
@@ -148,11 +148,11 @@ the shell first; never put them in a file in the install directory.
 | An interim "收到，正在转给主会话…" message appears | The inbox routine still uses an old prompt | Replace it with [inbox-routine-prompt.md](../skills/slack-bridge/references/inbox-routine-prompt.md) |
 | No 👀 at all in a channel | Bot not in the channel, or message did not @mention it | `/invite @Grok Bot`; mention it |
 | No 👀 at all in DMs, status says stopped | Machine restarted / crash | `start.sh` |
-| `slack_sdk is not installed` / missing venv | Install directory moved or venv deleted | `skills/slack-bridge/scripts/install.sh <dir>` (safe to re-run) |
+| `slack_sdk is not installed` / missing venv | Install directory moved or venv deleted | `skills/slack-bridge/scripts/install.sh <dir>` (safe to re-run). `ensure-running.sh` now does this automatically when `.venv` is missing or `slack_sdk` does not import (`action=reinstalled`) |
 
 ## Self-healing: `ensure-running.sh`
 
-`scripts/ensure-running.sh` is safe to run as often as you like:
+`scripts/ensure-running.sh` is safe to run as often as you like. If the install's `.venv` is missing or broken (for example after a box file restore), it first re-runs `install.sh <install-dir>` (symlinks and dependencies only; `config.json` and `.env` are untouched) and then continues:
 
 - running, heartbeat fresh, socket connected → does nothing (`action=none`, exit 0)
 - not running → `start.sh` (`action=started`)

@@ -53,6 +53,11 @@ class EnsureRunningLockTests(unittest.TestCase):
         (self.home / "config.json").write_text("{}")
         self.env = {k: v for k, v in os.environ.items() if k not in FAKE_ENV}
         self.env.update(FAKE_ENV, SLACK_BRIDGE_HOME=str(self.home))
+        # The venv health check imports slack_sdk; give the fake venv a stub.
+        stub = self.tmp / "pylib" / "slack_sdk"
+        stub.mkdir(parents=True)
+        (stub / "__init__.py").write_text("")
+        self.env["PYTHONPATH"] = str(stub.parent)
 
     def tearDown(self):
         subprocess.run(["bash", str(self.code / "stop.sh")], env=self.env, capture_output=True, timeout=30)
@@ -107,6 +112,49 @@ class EnsureRunningLockTests(unittest.TestCase):
         held = [os.readlink(f"/proc/{self.bridge_pid()}/fd/{fd}")
                 for fd in os.listdir(f"/proc/{self.bridge_pid()}/fd")]
         self.assertNotIn(str(lock), held)
+
+
+    def _fake_install(self):
+        # Stand-in for install.sh: records its argv and recreates the venv.
+        marker = self.tmp / "install-calls"
+        (self.code / "install.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "$*" >> "{marker}"\n'
+            'mkdir -p "$1/.venv/bin"\n'
+            f'ln -sfn "{sys.executable}" "$1/.venv/bin/python"\n')
+        os.chmod(self.code / "install.sh", 0o755)
+        return marker
+
+    def test_missing_venv_is_reinstalled_then_started(self):
+        marker = self._fake_install()
+        shutil.rmtree(self.home / ".venv")
+        p = self.sh("ensure-running.sh", "--quiet")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("action=reinstalled", p.stdout)
+        self.assertIn("action=started", p.stdout)
+        self.assertEqual(marker.read_text().split(), [str(self.home)])
+        self.assertEqual((self.home / "config.json").read_text(), "{}")
+        # Healthy now: a second run is silent and does not reinstall.
+        p = self.sh("ensure-running.sh", "--quiet")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout, "")
+        self.assertEqual(len(marker.read_text().splitlines()), 1)
+
+    def test_broken_venv_without_slack_sdk_is_reinstalled(self):
+        marker = self._fake_install()
+        self.env.pop("PYTHONPATH")
+        if subprocess.run([sys.executable, "-c", "import slack_sdk"], env=self.env,
+                          capture_output=True).returncode == 0:
+            self.skipTest("slack_sdk importable without stub")
+        p = self.sh("ensure-running.sh", "--dry-run")
+        self.assertIn("action=would-reinstall", p.stdout)
+        self.assertFalse(marker.exists())
+        p = self.sh("ensure-running.sh")
+        self.assertEqual(p.returncode, 2)  # fake install cannot add slack_sdk
+        self.assertIn("action=failed", p.stdout)
+        self.assertTrue(marker.exists())
+        for v in FAKE_ENV.values():
+            self.assertNotIn(v, p.stdout + p.stderr)
 
 
 if __name__ == "__main__":

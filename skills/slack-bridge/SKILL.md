@@ -79,7 +79,7 @@ All scripts live in `<install>/scripts/` and are idempotent:
 ```text
 install.sh <install-dir> [--bot-name NAME]   create/update install (venv, symlinks, README, config)
 start.sh | stop.sh | restart.sh | status.sh  manage the background bridge (nohup + setsid + pidfile + lock)
-ensure-running.sh [--dry-run] [--quiet]      no-op if healthy; start/restart if stopped, hung or disconnected
+ensure-running.sh [--dry-run] [--quiet]      no-op if healthy; reinstall venv if missing/broken; start/restart if stopped, hung or disconnected
 doctor.sh [--ping-webhook] [--json]          validate env, tokens (auth.test, apps.connections.open), webhook, process
 reconfigure.sh [--ping-webhook] [--agent-label L] [--owner U…]   doctor, then restart only if all checks pass
 reply.sh --op OP --channel C [--thread-ts T] [--ack-ts T] [--session-status S] <<'EOF' … EOF   reply as the bot

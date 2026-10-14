@@ -12,10 +12,14 @@
 # exits 2 without touching anything. One line per run is appended to
 # logs/ensure-running.log.
 #
+# If the virtualenv is missing or broken (no python, or slack_sdk does not
+# import), it first re-runs install.sh for this install dir (refreshes links
+# and deps only; config.json and .env are left alone), then carries on.
+#
 # Exit codes: 0 healthy or recovered, 1 recovery failed, 2 cannot start
 # (env/install problem), 3 another ensure-running is in progress.
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
-require_install
+[[ -f "$BRIDGE_HOME/config.json" ]] || require_install
 
 dry_run=0; quiet=0; stale="${SLACK_BRIDGE_STALE_SECONDS:-300}"
 while [[ $# -gt 0 ]]; do
@@ -23,7 +27,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) dry_run=1; shift;;
     --quiet) quiet=1; shift;;
     --stale-seconds) stale="${2:?}"; shift 2;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0;;
     *) die "unknown option $1";;
   esac
 done
@@ -45,6 +49,19 @@ report() {  # report <action> <detail>
   echo "$line" >> "$ENSURE_LOG"
   if (( ! quiet )) || [[ "$1" != none ]]; then echo "ensure-running: $line"; fi
 }
+
+venv_ok() { [[ -x "$PY" ]] && "$PY" -c 'import slack_sdk' >/dev/null 2>&1; }
+if ! venv_ok; then
+  if (( dry_run )); then
+    report would-reinstall "virtualenv missing or broken at $BRIDGE_HOME/.venv"
+  elif "$CODE_DIR/install.sh" "$BRIDGE_HOME" 9>&- >>"$ENSURE_LOG" 2>&1 && venv_ok; then
+    report reinstalled "virtualenv was missing or broken; install.sh $BRIDGE_HOME ok"
+  else
+    report failed "virtualenv missing or broken and install.sh failed; see $ENSURE_LOG"
+    exit 2
+  fi
+fi
+(( dry_run )) || require_install
 
 pid="$(running_pid)"
 reason=""

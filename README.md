@@ -273,7 +273,7 @@ rest. Set `report_channel` to get restart and failure reports in Slack.
 
 ```bash
 scripts/status.sh                    # process health, task state, last log lines
-scripts/ensure-running.sh            # start/restart only if stopped or unhealthy (for routines/cron)
+scripts/ensure-running.sh            # start/restart only if stopped or unhealthy; rebuilds a missing .venv (for routines/cron)
 scripts/reply.sh --op Ev0123 --channel C0123 --thread-ts 1712345678.000100 <<'EOF'
 **Done.** Here is the summary…
 EOF

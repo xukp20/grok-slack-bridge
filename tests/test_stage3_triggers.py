@@ -95,7 +95,7 @@ class BotLoopTests(unittest.TestCase):
         self.b._handle_envelope(bot_msg("1", ts="1700004001.000100"))
         self.b._handle_envelope(bot_msg("2", ts="1700004002.000100"))
         self.assertIn("max_bot_turns", self.b._handle_envelope(bot_msg("3", ts="1700004003.000100")))
-        self.assertEqual(self.b._handle_envelope(env("new", channel="C0CHAN", thread_ts=THREAD,
+        self.assertEqual(self.b._handle_envelope(env(f"<@{BOT_USER}> new", channel="C0CHAN", thread_ts=THREAD,
                                                      channel_type="channel")), "command:new")
         t = self.b.store.find_thread("C0CHAN", THREAD)
         self.assertEqual(t["bot_turns"], 0)
@@ -151,7 +151,7 @@ class BotLoopTests(unittest.TestCase):
     def test_non_owner_new_is_not_a_command(self):
         self._queue_mention()
         # OTHER saying "new" is just a normal (ignored under mention trigger) message
-        out = self.b._handle_envelope(env("new", channel="C0CHAN", thread_ts=THREAD,
+        out = self.b._handle_envelope(env(f"<@{BOT_USER}> new", channel="C0CHAN", thread_ts=THREAD,
                                           channel_type="channel", user=OTHER))
         self.assertNotIn("command", out)
         self.assertEqual(self.b.store.find_thread("C0CHAN", THREAD)["task_id"], 1)
@@ -268,12 +268,38 @@ class ResumeTests(unittest.TestCase):
         cont = env(f"<@{BOT_USER}> 继续", channel="C0CHAN", thread_ts="1700006000.000100",
                    channel_type="channel")
         self.assertEqual(b._handle_envelope(cont), "queued")  # live thread: normal message
-        stop = env("stop", channel="C0CHAN", thread_ts="1700006000.000100", channel_type="channel")
+        stop = env(f"<@{BOT_USER}> stop", channel="C0CHAN", thread_ts="1700006000.000100",
+                   channel_type="channel")
         self.assertEqual(b._handle_envelope(stop), "command:stop")
         again = env(f"<@{BOT_USER}> 继续", channel="C0CHAN", thread_ts="1700006000.000100",
                     channel_type="channel")
         self.assertEqual(b._handle_envelope(again), "command:resume")
         self.assertEqual(b.store.find_thread("C0CHAN", "1700006000.000100")["state"], "active")
+
+
+class CommandsNeedMentionTests(unittest.TestCase):
+    def test_bare_commands_in_followed_threads_are_not_commands(self):
+        for trigger in ("mention", "thread_follow"):
+            b = make_bridge(trigger=trigger)
+            root = env(f"<@{BOT_USER}> start", channel="C0CHAN", etype="app_mention", ts="1700007000.000100")
+            self.assertEqual(b._handle_envelope(root), "queued")
+            for word in ("停", "stop", "停止", "别回了", "new", "status", "help"):
+                out = b._handle_envelope(env(word, channel="C0CHAN", thread_ts="1700007000.000100",
+                                             channel_type="channel"))
+                self.assertFalse(str(out).startswith("command:"), (trigger, word, out))
+            self.assertEqual(b.store.find_thread("C0CHAN", "1700007000.000100")["state"] != "stopped", True)
+            out = b._handle_envelope(env(f"<@{BOT_USER}> 停", channel="C0CHAN", thread_ts="1700007000.000100",
+                                         channel_type="channel"))
+            self.assertEqual(out, "command:stop")
+            # a stopped thread: bare 继续 is not a resume; a mention is
+            self.assertFalse(str(b._handle_envelope(env("继续", channel="C0CHAN", thread_ts="1700007000.000100",
+                                                         channel_type="channel"))).startswith("command:"))
+            self.assertEqual(b._handle_envelope(env(f"<@{BOT_USER}> 继续", channel="C0CHAN",
+                                                    thread_ts="1700007000.000100", channel_type="channel")),
+                             "command:resume")
+
+    def test_bare_stop_still_works_in_dm(self):
+        self.assertEqual(make_bridge()._handle_envelope(env("停")), "command:stop")
 
 
 class ButtonStopTests(unittest.TestCase):

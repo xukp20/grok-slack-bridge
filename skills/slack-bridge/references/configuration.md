@@ -95,11 +95,14 @@ and writes explicit keys with the deny-by-default values.
 | `command_words` | see example | words that act as commands when they are the whole message (mention allowed) |
 | `stop_message`, `new_task_message`, `resume_message`, `help_text` | … | fixed replies |
 
-Commands (humans only):
+Commands (humans only). Every command must address the bot: an @mention in
+channels and threads (followed threads included; a bare `停` there is an
+ordinary message), or a DM / `/grok`, where the bare word works. The command
+word must be the whole message apart from the mention and punctuation.
 
 | Command | Who | Effect |
 | --- | --- | --- |
-| `stop` / `停` / `停止` / `别回了` | any allowed human (owner only under `owner_only`); no mention needed inside a followed thread (one where the bot already took a message); top level in a channel needs a mention. Must be the whole message. Bots cannot stop | thread → `stopped`; queued, in-flight and accepted operations → `stopped`; `reply.sh` refuses to post there (exit 3) |
+| `stop` / `停` / `停止` / `别回了` | any allowed human (owner only under `owner_only`), addressed to the bot (see below). Bots cannot stop | thread → `stopped`; queued, in-flight and accepted operations → `stopped`; `reply.sh` refuses to post there (exit 3) |
 | `new` / `新任务` | owner | new task in the thread: task id + 1, bot turn counter reset (when a cap is set), state `active` |
 | `resume` / `继续` | owner, only in a stopped/paused thread | state `active` (elsewhere `继续` is an ordinary message) |
 | `help` / `帮助` | any allowed human, addressed to the bot | fixed help text |

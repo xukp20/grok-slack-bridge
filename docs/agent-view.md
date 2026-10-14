@@ -108,8 +108,8 @@ scripts/slackctl.sh session --channel D0… --thread-ts 1712… --status active 
 **Stop cannot interrupt a run that is already working**, but it stops its
 output: the operation becomes `stopped`, `reply.sh --op` refuses to post
 into the thread (exit code 3), nothing queued is submitted, and later bot
-messages in the thread are ignored. Typing `stop` / `停` in the thread does
-the same. A new @mention or DM from an allowed person continues the thread.
+messages in the thread are ignored. Sending `@Grok Bot stop` / `@Grok Bot 停` in the thread (bare `停`
+in a DM) does the same. A new @mention or DM from an allowed person continues the thread.
 
 ## Config keys
 

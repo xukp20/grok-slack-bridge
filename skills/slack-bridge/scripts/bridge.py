@@ -368,8 +368,10 @@ class Bridge:
         """stop / new / resume as a bare text command from a human (never from bots)."""
         if msg.actor_type != "human":
             return ""
-        in_followed_thread = bool(msg.thread_ts) and bool(thread.get("following"))
-        if entry is None and not in_followed_thread:
+        # Commands must address the bot explicitly: an @mention in channels/threads
+        # (followed threads included), a DM, or /grok. A bare "停" in a channel thread is
+        # an ordinary message (forwarded only if the trigger forwards it).
+        if entry not in ("dm", "mention", "slash_command"):
             return ""
         text = re.sub(r"<@[A-Z0-9]+(\|[^>]*)?>", " ", msg.text or "")
         text = " ".join(text.split()).strip(self.COMMAND_STRIP).lower()
@@ -381,8 +383,6 @@ class Bridge:
             if text in {str(w).lower() for w in words.get(cmd, [])}:
                 if cmd in ("new", "resume", "status") and verdict.role != "owner":
                     return ""  # just a normal message from a non-owner
-                if cmd in ("resume", "help", "status") and entry is None:
-                    return ""
                 if cmd == "resume" and thread.get("state") not in ("stopped", "paused"):
                     return ""  # "继续"/"resume" in a live thread is a normal message
                 return cmd

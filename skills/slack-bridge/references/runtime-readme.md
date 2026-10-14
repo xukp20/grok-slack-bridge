@@ -185,7 +185,8 @@ so nothing it spawns inherits them. After the machine restarts, run
 `start.sh` again. `config.json` changes are picked up live (except
 `outbox_*`); env changes need `restart.sh` (or `reconfigure.sh`).
 
-In Slack, allowed humans can say `stop` / `停` in a thread, and the owner
+In Slack, allowed humans can send `@bot stop` / `@bot 停` in a thread (commands need
+the @mention in channels and threads; bare words work only in DMs), and the owner
 `new` (start a new task), `resume`, `status`; `help`
 lists them.
 

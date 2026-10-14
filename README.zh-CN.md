@@ -158,7 +158,17 @@ $S access check --user U0ALICE --channel C0123 --entry mention   # 解释某个�
 $S access validate
 ```
 
-Bot 默认被拒绝。要试点某个 Bot，在 `bot_allowlist` 里写它真实的 user/bot/app ID，
+Bot 默认被拒绝。`bot_access` 有两种模式（对应 native-agent-slack 的 strict/open）：
+`allowlist`（白名单，只放行 `bot_allowlist` 里的 Bot）和 `denylist`（黑名单，默认放行所有 Bot，
+只拒绝 `bot_denylist` 里的；旧写法 `all` 等同 `denylist`）。黑名单永远优先；在频道里 Bot 仍然要
+@ Grok Bot 才会触发（`trigger=mention`）。
+
+```json
+"bot_access": "denylist",
+"bot_denylist": ["A0SPAMMYAPP"]
+```
+
+白名单模式下，要试点某个 Bot，在 `bot_allowlist` 里写它真实的 user/bot/app ID，
 可以限定频道或线程、设置过期时间和最多轮数：
 
 ```json
@@ -169,11 +179,12 @@ Bot 默认被拒绝。要试点某个 Bot，在 `bot_allowlist` 里写它真实�
 ```
 
 不写 `channels` / `threads` / `expires_at` / `max_turns` 即表示任何频道/线程、永不过期。
-防循环：`max_bot_turns`（默认 4）只限制同一线程里**连续**的 Bot 消息数；线程里只要有人类发言就清零，
-所以 Bot 偶尔 @ Grok Bot 不受影响，只拦截没有人类插话的 Bot 互相来回。
+防循环：默认不限轮数（`max_bot_turns: 0`）。由 Agent 自己控制：任务完成、不需要再回复时，用
+`--no-reply` 结束这条消息，不回复 Bot；`bot_cooldown_seconds` 仍会拉开 Bot 消息间隔。需要硬上限时把
+`max_bot_turns` 设为正数（只计同一线程里连续的 Bot 消息，有人类发言就清零）。
 
 在 Slack 里，被允许的人可以在线程里说 `stop` / `停` / `停止`；所有者还可以说
-`new` / `新任务`（开始新任务并重置 Bot 轮数）、`resume`（恢复已停止/暂停的线程；
+`new` / `新任务`（开始新任务）、`resume`（恢复已停止/暂停的线程；
 在正常进行中的线程里"继续"只是普通消息）、`status` / `状态`；`help` / `帮助` 显示说明。
 
 每条消息在处理前先写入 `run/bridge.sqlite`。webhook 超时记为 `unknown-result`，

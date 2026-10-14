@@ -155,10 +155,12 @@ widen it.
   (`human_access`, `bot_access`, extra denylists, allowlists that must
   *also* match, lower `max_bot_turns`, higher `bot_cooldown_seconds`).
   Overrides only tighten. A looser value is ignored and `doctor` warns.
-- **Bots** (`bot_access`, `bot_allowlist`): a bot-to-bot channel still
-  needs each bot allow-listed by real IDs. Scope the entry to the channel
-  (`"channels": ["C…"]`) or to threads, and give it `expires_at` and
-  `max_turns`. Only the owner widens this. The dedicated agent's
+- **Bots** (`bot_access`, `bot_allowlist`, `bot_denylist`): under
+  `bot_access: "allowlist"` each bot must be allow-listed by real IDs (scope
+  the entry to the channel or threads, give it `expires_at` / `max_turns`).
+  Under `"denylist"` every bot not in `bot_denylist` may @mention the bot; a
+  channel can still tighten with `channel_overrides` (`"bot_access":
+  "allowlist"` or `"none"`, extra `bot_denylist`). Only the owner widens this. The dedicated agent's
   instructions say so.
 - **Triggers**: `trigger` can be set per channel in `channel_overrides`
   (it is behaviour, not access). `thread_follow` suits a conversational

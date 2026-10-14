@@ -416,11 +416,11 @@ class Bridge:
             reactivate = True
         not_before = 0.0
         if msg.actor_type == "bot":
-            limit = int(policy["max_bot_turns"])
+            limit = int(policy["max_bot_turns"])          # 0 = unlimited
             if verdict.bot_entry and verdict.bot_entry.get("max_turns") not in (None, ""):
-                limit = min(limit, int(verdict.bot_entry["max_turns"]))
+                limit = access._tighter_limit(limit, access.turn_limit(verdict.bot_entry["max_turns"]))
             turns = int(thread.get("bot_turns") or 0)
-            if turns >= limit:
+            if limit and turns >= limit:
                 return Decision("ignore", f"max_bot_turns reached ({turns}/{limit} consecutive bot "
                                 "turns); any human message in the thread resets it", verdict=verdict)
             last = float(thread.get("last_bot_at") or 0)
@@ -911,7 +911,7 @@ class Bridge:
         if thread:
             policy = access.effective_policy(self.cfg, thread["channel"])
             lines.append(f"This thread: {thread['state']}, task #{thread['task_id']}, bot turns "
-                         f"{thread['bot_turns']}/{policy['max_bot_turns']}, trigger {policy['trigger']}.")
+                         f"{thread['bot_turns']}/{policy['max_bot_turns'] or 'unlimited'}, trigger {policy['trigger']}.")
         return "\n".join(lines)
 
     # -- catch-up --------------------------------------------------------------

@@ -36,7 +36,7 @@ this order:
 | `human_access` | `owner_only` | `owner_only` \| `allowlist` (`user_allowlist`) \| `everyone`. The owner is always allowed |
 | `user_allowlist` | `[]` | member IDs allowed when `human_access=allowlist` |
 | `user_denylist` | `[]` | member IDs never served |
-| `bot_access` | `none` | `none` \| `allowlist` (`bot_allowlist`) \| `all` |
+| `bot_access` | `none` | `none` \| `allowlist` (only `bot_allowlist`) \| `denylist` (default allow: every bot except `bot_denylist`; `all` is a legacy alias). Strictness: denylist < allowlist < none |
 | `bot_allowlist` | `[]` | objects, see below |
 | `bot_denylist` | `[]` | user (`U…`), bot (`B…`) or app (`A…`) IDs never served; an app ID blocks every bot of that app |
 | `channel_allowlist` | `[]` | if set, only these channels (DMs always allowed) |
@@ -63,14 +63,17 @@ Find them in a message's raw event (`user`, `bot_id`, `app_id`) or with
   accepted; omit for anywhere.
 - `expires_at`: ISO 8601 with a UTC offset, or epoch seconds. An
   unparseable value counts as already expired (fail closed).
-- `max_turns` caps `max_bot_turns` for this bot (omit for the global cap).
+- `max_turns` caps consecutive turns for this bot (omit for the global `max_bot_turns`).
+- In `denylist` mode a matching entry is not required; if one matches, its
+  `max_turns` still applies, but its `channels`/`threads`/`expires_at` scope
+  does not restrict the bot (use `bot_denylist` or a channel override).
 - Bots can never use `/grok`, buttons, or text commands.
 
 `channel_overrides["C…"]` may only make things **stricter**:
 `human_access`, `bot_access` (a looser value is ignored and `doctor` warns),
 `user_denylist` / `bot_denylist` (added to the global ones),
 `user_allowlist` / `bot_allowlist` (lists of IDs that must *also* match),
-`max_bot_turns` (lower wins), `bot_cooldown_seconds` (higher wins). `trigger`
+`max_bot_turns` (lower positive value wins; 0 = no cap), `bot_cooldown_seconds` (higher wins). `trigger`
 is behaviour, not access, so a channel may pick any trigger.
 
 Messages from refused senders are never forwarded and are hidden from
@@ -87,7 +90,7 @@ and writes explicit keys with the deny-by-default values.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `trigger` | `mention` | `mention`: DMs and @mentions only. `thread_follow`: also every later message in a thread where the bot was mentioned (no new mention needed). `all`: every message in channels the bot is in. DMs and `/grok` always count |
-| `max_bot_turns` | `4` | **consecutive** forwarded bot messages in one thread; any human message in that thread resets the count (so does the owner's `new`). Once reached, bots are ignored there until a human posts |
+| `max_bot_turns` | `0` | `0` = unlimited (default): the agent ends bot exchanges itself with `--no-reply` (see dispatcher-guideline.md). `N > 0` caps **consecutive** forwarded bot messages in one thread; any human message (or the owner's `new`) resets the count |
 | `bot_cooldown_seconds` | `10` | minimum gap between forwarded bot messages in one thread; extra messages are delayed (not dropped) |
 | `command_words` | see example | words that act as commands when they are the whole message (mention allowed) |
 | `stop_message`, `new_task_message`, `resume_message`, `help_text` | … | fixed replies |
@@ -96,8 +99,8 @@ Commands (humans only):
 
 | Command | Who | Effect |
 | --- | --- | --- |
-| `stop` / `停` / `停止` / `别回了` | any allowed human, also without a mention inside a followed thread | thread → `stopped`; queued, in-flight and accepted operations → `stopped`; `reply.sh` refuses to post there (exit 3) |
-| `new` / `新任务` | owner | new task in the thread: task id + 1, bot turn counter reset, state `active` |
+| `stop` / `停` / `停止` / `别回了` | any allowed human (owner only under `owner_only`); no mention needed inside a followed thread (one where the bot already took a message); top level in a channel needs a mention. Must be the whole message. Bots cannot stop | thread → `stopped`; queued, in-flight and accepted operations → `stopped`; `reply.sh` refuses to post there (exit 3) |
+| `new` / `新任务` | owner | new task in the thread: task id + 1, bot turn counter reset (when a cap is set), state `active` |
 | `resume` / `继续` | owner, only in a stopped/paused thread | state `active` (elsewhere `继续` is an ordinary message) |
 | `help` / `帮助` | any allowed human, addressed to the bot | fixed help text |
 | `status` / `状态` | owner, addressed to the bot | bridge + queue + thread summary |
@@ -218,6 +221,12 @@ conversation (export `GROK_WEBHOOK_URL_RELEASE` and
                   "webhook_auth_env": "GROK_WEBHOOK_AUTH_RELEASE"}}},
   "busy_policy": "interrupt_merge"
 }
+```
+
+Open bot access (default allow, denylist wins, bots still need an @mention):
+
+```json
+{"bot_access": "denylist", "bot_denylist": [], "max_bot_turns": 0, "bot_cooldown_seconds": 20}
 ```
 
 Short bot-to-bot pilot in one thread (expires, few turns, followed thread):

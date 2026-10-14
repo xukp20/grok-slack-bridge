@@ -83,7 +83,7 @@ Every event is checked in this order; anything that fails is recorded and
 5. thread state: `stopped`/`paused` threads take no bot messages, and humans
    must address the bot to continue them;
 6. trigger (`mention` / `thread_follow` / `all`); DMs always count;
-7. bot loop limits (`max_bot_turns`, `bot_cooldown_seconds`).
+7. bot loop limits (`max_bot_turns`, 0 = unlimited by default; `bot_cooldown_seconds`).
 
 Agent events (`app_context_changed`, `agent_session_stopped`,
 `agent_session_title_changed`, `app_home_opened`) are handled inside the

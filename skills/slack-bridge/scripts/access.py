@@ -11,7 +11,8 @@ Order of evaluation (first match wins):
   4. denylists (user_denylist, bot_denylist, plus per-channel additions) match
      any of the actor's real IDs (user, bot, app) -> refused. Denylists win.
   5. humans: human_access everyone | allowlist | owner_only
-     bots:   bot_access   none | allowlist | all
+     bots:   bot_access   none | allowlist | denylist
+             (denylist = every bot except bot_denylist; "all" is a legacy alias)
      Per-channel overrides can only make access stricter.
 
 Bots are matched by real IDs only (user U…, bot B…, app A…), never by name.
@@ -25,7 +26,8 @@ from datetime import datetime
 from typing import Any, Iterable
 
 HUMAN_ACCESS = ("everyone", "allowlist", "owner_only")     # loosest -> strictest
-BOT_ACCESS = ("all", "allowlist", "none")                  # loosest -> strictest
+BOT_ACCESS = ("denylist", "allowlist", "none")             # loosest -> strictest
+BOT_ACCESS_ALIASES = {"all": "denylist"}                   # legacy spelling
 TRIGGERS = ("mention", "thread_follow", "all")
 ENTRIES = ("dm", "mention", "thread_follow", "channel", "slash_command", "button")
 
@@ -93,12 +95,34 @@ def parse_expiry(value: Any) -> float | None:
         return 0.0  # unparseable expiry = already expired (fail closed)
 
 
+def bot_mode(value: Any, default: str = "none") -> str:
+    """Normalize a bot_access value ("all" -> "denylist"); unknown values -> default."""
+    v = BOT_ACCESS_ALIASES.get(str(value), value) if value not in (None, "") else default
+    return v if v in BOT_ACCESS else default
+
+
+def turn_limit(value: Any) -> int:
+    """max_bot_turns as an int; 0 / null / negative / junk = unlimited (returned as 0)."""
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(n, 0)
+
+
+def _tighter_limit(a: int, b: int) -> int:
+    """Combine two turn limits where 0 means unlimited: the smaller positive one wins."""
+    pos = [n for n in (a, b) if n > 0]
+    return min(pos) if pos else 0
+
+
 def effective_policy(cfg: dict, channel: str) -> dict:
     """Global policy tightened by channel_overrides[channel] (never loosened)."""
     ov = (cfg.get("channel_overrides") or {}).get(channel) or {}
     policy = {
         "human_access": _stricter(HUMAN_ACCESS, cfg.get("human_access", "owner_only"), ov.get("human_access")),
-        "bot_access": _stricter(BOT_ACCESS, cfg.get("bot_access", "none"), ov.get("bot_access")),
+        "bot_access": _stricter(BOT_ACCESS, bot_mode(cfg.get("bot_access")),
+                                bot_mode(ov["bot_access"], "none") if ov.get("bot_access") else None),
         "user_denylist": _ids(cfg.get("user_denylist")) | _ids(ov.get("user_denylist")),
         "bot_denylist": _ids(cfg.get("bot_denylist")) | _ids(ov.get("bot_denylist")),
         "user_allowlist": _ids(cfg.get("user_allowlist")),
@@ -107,8 +131,10 @@ def effective_policy(cfg: dict, channel: str) -> dict:
         # Behaviour (not access): channels may choose their own trigger and loop limits,
         # but loop limits can only get stricter.
         "trigger": ov.get("trigger") or cfg.get("trigger", "mention"),
-        "max_bot_turns": min(int(cfg.get("max_bot_turns", 4)),
-                             int(ov.get("max_bot_turns", cfg.get("max_bot_turns", 4)))),
+        # max_bot_turns: 0 / null = unlimited (the default). Loop control normally comes
+        # from the agent ending ops with --no-reply, not from a counter.
+        "max_bot_turns": _tighter_limit(turn_limit(cfg.get("max_bot_turns", 0)),
+                                        turn_limit(ov.get("max_bot_turns", 0))),
         "bot_cooldown_seconds": max(float(cfg.get("bot_cooldown_seconds", 10)),
                                     float(ov.get("bot_cooldown_seconds", 0))),
     }
@@ -203,9 +229,12 @@ def check(cfg: dict, ident, actor: Actor, *, channel: str, root_ts: str = "", en
     chan = policy["channel_bot_allowlist"]
     if chan is not None and not (actor.ids & chan):
         return refuse("bot not in this channel's bot_allowlist")
-    if mode == "all":
-        return Verdict(True, "bot_access=all", "bot", list(DEFAULT_PERMISSIONS), policy=policy)
     entry_match, why = match_bot_entry(cfg.get("bot_allowlist") or [], actor, channel, root_ts, now)
+    if mode == "denylist":
+        # Default allow: every bot not denylisted (step 4 already refused those). A matching
+        # bot_allowlist entry is still attached (per-bot max_turns, mention permission).
+        return Verdict(True, "bot_access=denylist", "bot", list(DEFAULT_PERMISSIONS),
+                       bot_entry=entry_match, policy=policy)
     if entry_match is None:
         return refuse(why)
     return Verdict(True, f"bot_allowlist {entry_match.get('label') or ''}".strip(), "bot",
@@ -217,7 +246,7 @@ def validate(cfg: dict) -> list[str]:
     problems = []
     if cfg.get("human_access", "owner_only") not in HUMAN_ACCESS:
         problems.append(f"human_access must be one of {HUMAN_ACCESS} (treated as owner_only)")
-    if cfg.get("bot_access", "none") not in BOT_ACCESS:
+    if bot_mode(cfg.get("bot_access"), "?") == "?":
         problems.append(f"bot_access must be one of {BOT_ACCESS} (treated as none)")
     if cfg.get("trigger", "mention") not in TRIGGERS:
         problems.append(f"trigger must be one of {TRIGGERS} (treated as mention)")
@@ -240,6 +269,9 @@ def validate(cfg: dict) -> list[str]:
             if k in ov:
                 order = HUMAN_ACCESS if k == "human_access" else BOT_ACCESS
                 g = cfg.get(k, "owner_only" if k == "human_access" else "none")
+                if k == "bot_access":
+                    ov = dict(ov, bot_access=bot_mode(ov[k], ov[k]))
+                    g = bot_mode(g, g)
                 if ov[k] in order and g in order and order.index(ov[k]) < order.index(g):
                     problems.append(f"channel_overrides[{ch}].{k}={ov[k]} is looser than the global "
                                     f"{g}; overrides can only tighten, so {g} applies")

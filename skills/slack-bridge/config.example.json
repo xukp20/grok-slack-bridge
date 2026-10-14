@@ -15,7 +15,7 @@
   "channel_allowlist": [],
   "channel_overrides": {},
   "trigger": "mention",
-  "max_bot_turns": 4,
+  "max_bot_turns": 0,
   "bot_cooldown_seconds": 10,
   "command_words": {
     "stop": [
@@ -42,8 +42,8 @@
       "状态"
     ]
   },
-  "help_text": "Mention me or DM me with a question or task. Commands: `stop` (or 停/停止) stops the current task in this thread; the owner can also use `new` (new task, resets bot turn limits), `resume` and `status`.",
-  "new_task_message": "OK, new task. Bot turn counter reset.",
+  "help_text": "Mention me or DM me with a question or task. Commands: `stop` (or 停/停止) stops the current task in this thread; the owner can also use `new` (new task), `resume` and `status`.",
+  "new_task_message": "OK, new task.",
   "resume_message": "Resumed.",
   "deny_message": "Sorry, I only take requests from my owner here.",
   "session_routing": {

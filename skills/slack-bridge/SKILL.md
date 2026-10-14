@@ -21,7 +21,7 @@ posts the answer as the bot and closes the operation.
 
 - **Access** (one check for DMs, mentions, followed threads, `/grok`,
   buttons, Stop): workspace + app verified; `human_access`
-  `owner_only|allowlist|everyone`, `bot_access` `none|allowlist|all` with
+  `owner_only|allowlist|everyone`, `bot_access` `none|allowlist|denylist` (`all` = denylist) with
   ID-matched, scoped, expiring `bot_allowlist`; denylists win; per-channel
   overrides only tighten. Default: owner only, no bots.
 - **Reliability**: persisted dedup, operation state machine, a webhook
@@ -33,7 +33,8 @@ posts the answer as the bot and closes the operation.
   messages in DMs and member channels (per-channel high-water mark; same
   filters as live events; deduped by channel:ts; `catchup: true`).
 - **Triggers & loops**: `trigger` `mention|thread_follow|all`;
-  `max_bot_turns` (consecutive bot turns per thread; any human message resets),
+  `max_bot_turns` (0 = unlimited, the default; loop control is the agent's
+  `--no-reply`; N>0 caps consecutive bot turns per thread),
   `bot_cooldown_seconds`; `stop`/`停` stops a thread
   (checked before enqueue, before submit and in `reply.sh`), owner `new`
   resets; bot threads stay paused after restarts.

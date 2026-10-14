@@ -41,4 +41,16 @@ Slack dispatcher rules (top-level conversation)
    message the user or third parties unless you gave them the exact reply command.
 8. When a background task reports, verify the result before relaying it, and redirect
    or stop it if the user changed the request.
+9. Bot-to-bot threads have no turn limit; you are the loop control. When you coordinate
+   other agents (bots) in a thread, answer only when your message moves the work
+   forward: an instruction, a needed answer, or a correction. When the task is done, or
+   a bot's message needs nothing from you (thanks, acknowledgements, status echoes,
+   "done" reports you have verified), close that operation with no_reply_command
+   --reason "<why>" instead of replying. That --no-reply is the operation's one final.
+   Never answer a bot just to be polite.
+10. When dispatched work in a channel thread finishes, you may post one result report
+   straight to the owner's DM (reply.sh --channel <owner DM> --text-file report.md, with
+   no --op) summarising what was done and linking the thread. That report is separate
+   from the operation's final (which stays --no-reply in the bot thread). Send at most
+   one such report per finished task, never per bot message.
 ```

@@ -218,14 +218,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "human_access": "owner_only",       # everyone | allowlist | owner_only
     "user_allowlist": [],
     "user_denylist": [],
-    "bot_access": "none",               # none | allowlist | all
+    "bot_access": "none",               # none | allowlist | denylist (all bots except bot_denylist)
     "bot_allowlist": [],                # [{"user_id","bot_id","app_id","label","channels","threads","expires_at","max_turns"}]
     "bot_denylist": [],
     "channel_allowlist": [],            # empty = every channel the bot is in
     "channel_overrides": {},            # {"C…": {...}} may only tighten access
     # Triggers and loop control (stage 3)
     "trigger": "mention",               # mention | thread_follow | all (DMs always count)
-    "max_bot_turns": 4,                 # consecutive forwarded bot messages per thread (a human message resets)
+    "max_bot_turns": 0,                 # 0 = unlimited (default); N>0 caps consecutive bot turns per thread
     "bot_cooldown_seconds": 10,         # min gap between forwarded bot messages in a thread
     "command_words": {
         "stop": ["stop", "停", "停止", "别回了"],
@@ -235,9 +235,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "status": ["status", "状态"],
     },
     "help_text": ("Mention me or DM me with a question or task. Commands: `stop` (or 停/停止) "
-                  "stops the current task in this thread; the owner can also use `new` (new task, "
-                  "resets bot turn limits), `resume` and `status`."),
-    "new_task_message": "OK, new task. Bot turn counter reset.",
+                  "stops the current task in this thread; the owner can also use `new` (new task), "
+                  "`resume` and `status`."),
+    "new_task_message": "OK, new task.",
     "resume_message": "Resumed.",
     "deny_message": "Sorry, I only take requests from my owner here.",
     # Session routing: which agent conversation handles a channel (passed to the
@@ -307,7 +307,7 @@ ACK_MODES = ("reaction", "status", "none")
 LEGACY_ACK_KEYS = ("react_on_receipt", "ack_reaction")
 
 ACCESS_MODES = ("everyone", "allowlist", "owner_only")
-BOT_ACCESS_MODES = ("none", "allowlist", "all")
+BOT_ACCESS_MODES = ("none", "allowlist", "denylist", "all")  # "all" = legacy alias of denylist
 LIST_KEYS = ("user_allowlist", "user_denylist", "bot_denylist", "channel_allowlist", "mention_allowlist")
 
 

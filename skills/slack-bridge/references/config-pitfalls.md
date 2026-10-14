@@ -86,7 +86,7 @@ show up there.
   "channel_overrides": {"C0ANNOUNCE": {"human_access": "owner_only", "bot_access": "none"}},
 
   "trigger": "mention",
-  "max_bot_turns": 4,
+  "max_bot_turns": 0,
   "bot_cooldown_seconds": 20,
 
   "report_channel": "C0OPS",
